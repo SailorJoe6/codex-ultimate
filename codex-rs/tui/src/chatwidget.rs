@@ -81,6 +81,7 @@ use codex_core::protocol::ExecCommandEndEvent;
 use codex_core::protocol::ExecCommandOutputDeltaEvent;
 use codex_core::protocol::ExecCommandSource;
 use codex_core::protocol::ExitedReviewModeEvent;
+use codex_core::protocol::ListCustomCommandsResponseEvent;
 use codex_core::protocol::ListCustomPromptsResponseEvent;
 use codex_core::protocol::ListSkillsResponseEvent;
 use codex_core::protocol::McpListToolsResponseEvent;
@@ -513,6 +514,7 @@ pub(crate) struct ChatWidget {
     rate_limit_switch_prompt: RateLimitSwitchPromptState,
     rate_limit_poller: Option<JoinHandle<()>>,
     adaptive_chunking: AdaptiveChunkingPolicy,
+    custom_commands_poller: Option<JoinHandle<()>>,
     // Stream lifecycle controller
     stream_controller: Option<StreamController>,
     // Stream lifecycle controller for proposed plan output.
@@ -1059,6 +1061,8 @@ impl ChatWidget {
         }
         // Ask codex-core to enumerate custom prompts for this session.
         self.submit_op(Op::ListCustomPrompts);
+        self.submit_op(Op::ListCustomCommands);
+        self.start_custom_commands_poller();
         self.submit_op(Op::ListSkills {
             cwds: Vec::new(),
             force_reload: true,
@@ -2638,6 +2642,7 @@ impl ChatWidget {
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
             rate_limit_poller: None,
             adaptive_chunking: AdaptiveChunkingPolicy::default(),
+            custom_commands_poller: None,
             stream_controller: None,
             plan_stream_controller: None,
             running_commands: HashMap::new(),
@@ -2802,6 +2807,7 @@ impl ChatWidget {
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
             rate_limit_poller: None,
             adaptive_chunking: AdaptiveChunkingPolicy::default(),
+            custom_commands_poller: None,
             stream_controller: None,
             plan_stream_controller: None,
             running_commands: HashMap::new(),
@@ -2955,6 +2961,7 @@ impl ChatWidget {
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
             rate_limit_poller: None,
             adaptive_chunking: AdaptiveChunkingPolicy::default(),
+            custom_commands_poller: None,
             stream_controller: None,
             plan_stream_controller: None,
             running_commands: HashMap::new(),
@@ -4077,6 +4084,7 @@ impl ChatWidget {
             EventMsg::GetHistoryEntryResponse(ev) => self.on_get_history_entry_response(ev),
             EventMsg::McpListToolsResponse(ev) => self.on_list_mcp_tools(ev),
             EventMsg::ListCustomPromptsResponse(ev) => self.on_list_custom_prompts(ev),
+            EventMsg::ListCustomCommandsResponse(ev) => self.on_list_custom_commands(ev),
             EventMsg::ListSkillsResponse(ev) => self.on_list_skills(ev),
             EventMsg::ListRemoteSkillsResponse(_) | EventMsg::RemoteSkillDownloaded(_) => {}
             EventMsg::SkillsUpdateAvailable => {
@@ -4598,6 +4606,28 @@ impl ChatWidget {
 
     pub(crate) fn refresh_connectors(&mut self, force_refetch: bool) {
         self.prefetch_connectors_with_options(force_refetch);
+    }
+
+    fn stop_custom_commands_poller(&mut self) {
+        if let Some(handle) = self.custom_commands_poller.take() {
+            handle.abort();
+        }
+    }
+
+    fn start_custom_commands_poller(&mut self) {
+        self.stop_custom_commands_poller();
+
+        let app_event_tx = self.app_event_tx.clone();
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+
+            loop {
+                app_event_tx.send(AppEvent::CodexOp(Op::ListCustomCommands));
+                interval.tick().await;
+            }
+        });
+
+        self.custom_commands_poller = Some(handle);
     }
 
     fn prefetch_connectors(&mut self) {
@@ -6832,6 +6862,20 @@ impl ChatWidget {
         self.bottom_pane.set_custom_prompts(ev.custom_prompts);
     }
 
+    fn on_list_custom_commands(&mut self, ev: ListCustomCommandsResponseEvent) {
+        let len = ev.custom_commands.len();
+        debug!("received {len} custom commands");
+        self.bottom_pane.set_custom_commands(ev.custom_commands);
+        for error in ev.errors {
+            let message = format!(
+                "Custom command error in {}: {}",
+                error.path.display(),
+                error.message
+            );
+            self.add_to_history(history_cell::new_warning_event(message));
+        }
+    }
+
     fn on_list_skills(&mut self, ev: ListSkillsResponseEvent) {
         self.set_skills_from_response(&ev);
     }
@@ -7168,6 +7212,7 @@ fn has_websocket_timing_metrics(summary: RuntimeMetricsSummary) -> bool {
 impl Drop for ChatWidget {
     fn drop(&mut self) {
         self.stop_rate_limit_poller();
+        self.stop_custom_commands_poller();
     }
 }
 
