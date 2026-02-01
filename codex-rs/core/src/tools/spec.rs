@@ -1376,18 +1376,18 @@ pub(crate) fn build_specs(
         builder.register_handler("get_memory", get_memory_handler);
     }
 
-    if let Some(apply_patch_tool_type) = &config.apply_patch_tool_type {
-        if tool_allowed(config, "apply_patch") {
-            match apply_patch_tool_type {
-                ApplyPatchToolType::Freeform => {
-                    builder.push_spec(create_apply_patch_freeform_tool());
-                }
-                ApplyPatchToolType::Function => {
-                    builder.push_spec(create_apply_patch_json_tool());
-                }
+    if let Some(apply_patch_tool_type) = &config.apply_patch_tool_type
+        && tool_allowed(config, "apply_patch")
+    {
+        match apply_patch_tool_type {
+            ApplyPatchToolType::Freeform => {
+                builder.push_spec(create_apply_patch_freeform_tool());
             }
-            builder.register_handler("apply_patch", apply_patch_handler);
+            ApplyPatchToolType::Function => {
+                builder.push_spec(create_apply_patch_json_tool());
+            }
         }
+        builder.register_handler("apply_patch", apply_patch_handler);
     }
 
     if config

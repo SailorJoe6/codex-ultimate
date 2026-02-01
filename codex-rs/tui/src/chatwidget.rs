@@ -3042,7 +3042,6 @@ impl ChatWidget {
                         text_elements,
                         mention_paths: self.bottom_pane.take_mention_paths(),
                         command_overrides,
-                        command_overrides,
                     };
                     if self.is_session_configured() && !self.is_plan_streaming_in_tui() {
                         // Submitted is only emitted when steer is enabled.
@@ -3067,7 +3066,6 @@ impl ChatWidget {
                             .take_recent_submission_images_with_placeholders(),
                         text_elements,
                         mention_paths: self.bottom_pane.take_mention_paths(),
-                        command_overrides,
                         command_overrides,
                     };
                     self.queue_user_message(user_message);
@@ -3574,8 +3572,6 @@ impl ChatWidget {
             text,
             local_images,
             text_elements,
-            mention_paths,
-            command_overrides,
             mention_paths,
             command_overrides,
         } = user_message;
