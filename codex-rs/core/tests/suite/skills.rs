@@ -80,6 +80,8 @@ async fn user_turn_includes_skill_instructions() -> Result<()> {
             summary: codex_protocol::config_types::ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 

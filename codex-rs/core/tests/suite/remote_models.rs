@@ -323,6 +323,8 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -534,6 +536,8 @@ async fn remote_models_apply_remote_base_instructions() -> Result<()> {
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 

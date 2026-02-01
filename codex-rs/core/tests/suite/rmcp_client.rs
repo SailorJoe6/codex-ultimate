@@ -8,10 +8,8 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-use codex_core::CodexAuth;
 use codex_core::config::types::McpServerConfig;
 use codex_core::config::types::McpServerTransportConfig;
-use codex_core::models_manager::manager::RefreshStrategy;
 
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::EventMsg;
@@ -20,17 +18,9 @@ use codex_core::protocol::McpToolCallBeginEvent;
 use codex_core::protocol::Op;
 use codex_core::protocol::SandboxPolicy;
 use codex_protocol::config_types::ReasoningSummary;
-use codex_protocol::openai_models::ConfigShellToolType;
-use codex_protocol::openai_models::InputModality;
-use codex_protocol::openai_models::ModelInfo;
-use codex_protocol::openai_models::ModelVisibility;
-use codex_protocol::openai_models::ModelsResponse;
-use codex_protocol::openai_models::ReasoningEffortPreset;
-use codex_protocol::openai_models::TruncationPolicyConfig;
 use codex_protocol::user_input::UserInput;
 use codex_utils_cargo_bin::cargo_bin;
 use core_test_support::responses;
-use core_test_support::responses::mount_models_once;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::skip_if_no_network;
 use core_test_support::stdio_server_bin;
@@ -125,12 +115,14 @@ async fn stdio_server_round_trip() -> anyhow::Result<()> {
             final_output_json_schema: None,
             cwd: fixture.cwd.path().to_path_buf(),
             approval_policy: AskForApproval::Never,
-            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            sandbox_policy: SandboxPolicy::ReadOnly,
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -257,31 +249,6 @@ async fn stdio_image_responses_round_trip() -> anyhow::Result<()> {
         .await?;
     let session_model = fixture.session_configured.model.clone();
 
-    let tools_ready_deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        fixture.codex.submit(Op::ListMcpTools).await?;
-        let list_event = core_test_support::wait_for_event_with_timeout(
-            &fixture.codex,
-            |ev| matches!(ev, EventMsg::McpListToolsResponse(_)),
-            Duration::from_secs(10),
-        )
-        .await;
-        let EventMsg::McpListToolsResponse(tool_list) = list_event else {
-            unreachable!("event guard guarantees McpListToolsResponse");
-        };
-        if tool_list.tools.contains_key(&tool_name) {
-            break;
-        }
-
-        let available_tools: Vec<&str> = tool_list.tools.keys().map(String::as_str).collect();
-        if Instant::now() >= tools_ready_deadline {
-            panic!(
-                "timed out waiting for MCP tool {tool_name} to become available; discovered tools: {available_tools:?}"
-            );
-        }
-        sleep(Duration::from_millis(200)).await;
-    }
-
     fixture
         .codex
         .submit(Op::UserTurn {
@@ -292,12 +259,14 @@ async fn stdio_image_responses_round_trip() -> anyhow::Result<()> {
             final_output_json_schema: None,
             cwd: fixture.cwd.path().to_path_buf(),
             approval_policy: AskForApproval::Never,
-            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            sandbox_policy: SandboxPolicy::ReadOnly,
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -368,78 +337,83 @@ async fn stdio_image_responses_round_trip() -> anyhow::Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[serial(mcp_test_value)]
-async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Result<()> {
+async fn stdio_image_completions_round_trip() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
 
-    let call_id = "img-text-only-1";
+    let call_id = "img-cc-1";
     let server_name = "rmcp";
     let tool_name = format!("mcp__{server_name}__image");
-    let text_only_model_slug = "rmcp-text-only-model";
 
-    let models_mock = mount_models_once(
-        &server,
-        ModelsResponse {
-            models: vec![ModelInfo {
-                slug: text_only_model_slug.to_string(),
-                display_name: "RMCP Text Only".to_string(),
-                description: Some("Test model without image input support".to_string()),
-                default_reasoning_level: None,
-                supported_reasoning_levels: vec![ReasoningEffortPreset {
-                    effort: codex_protocol::openai_models::ReasoningEffort::Medium,
-                    description: "Medium".to_string(),
-                }],
-                shell_type: ConfigShellToolType::Default,
-                visibility: ModelVisibility::List,
-                supported_in_api: true,
-                priority: 1,
-                upgrade: None,
-                base_instructions: "base instructions".to_string(),
-                model_messages: None,
-                supports_reasoning_summaries: false,
-                support_verbosity: false,
-                default_verbosity: None,
-                apply_patch_tool_type: None,
-                truncation_policy: TruncationPolicyConfig::bytes(10_000),
-                supports_parallel_tool_calls: false,
-                context_window: Some(272_000),
-                auto_compact_token_limit: None,
-                effective_context_window_percent: 95,
-                experimental_supported_tools: Vec::new(),
-                input_modalities: vec![InputModality::Text],
-                prefer_websockets: false,
-                used_fallback_model_metadata: false,
-            }],
-        },
-    )
-    .await;
+    let tool_call = json!({
+        "choices": [
+            {
+                "delta": {
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {"name": tool_name, "arguments": "{}"}
+                        }
+                    ]
+                },
+                "finish_reason": "tool_calls"
+            }
+        ]
+    });
+    let sse_tool_call = format!(
+        "data: {}\n\ndata: [DONE]\n\n",
+        serde_json::to_string(&tool_call)?
+    );
 
-    // First stream: model decides to call the image tool.
-    mount_sse_once(
-        &server,
-        responses::sse(vec![
-            responses::ev_response_created("resp-1"),
-            responses::ev_function_call(call_id, &tool_name, "{}"),
-            responses::ev_completed("resp-1"),
-        ]),
-    )
-    .await;
-    // Second stream: after tool execution, assistant emits a message and completes.
-    let final_mock = mount_sse_once(
-        &server,
-        responses::sse(vec![
-            responses::ev_assistant_message("msg-1", "rmcp image tool completed successfully."),
-            responses::ev_completed("resp-2"),
-        ]),
-    )
-    .await;
+    let final_assistant = json!({
+        "choices": [
+            {
+                "delta": {"content": "rmcp image tool completed successfully."},
+                "finish_reason": "stop"
+            }
+        ]
+    });
+    let sse_final = format!(
+        "data: {}\n\ndata: [DONE]\n\n",
+        serde_json::to_string(&final_assistant)?
+    );
+
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    struct ChatSeqResponder {
+        num_calls: AtomicUsize,
+        bodies: Vec<String>,
+    }
+    impl wiremock::Respond for ChatSeqResponder {
+        fn respond(&self, _: &wiremock::Request) -> wiremock::ResponseTemplate {
+            let idx = self.num_calls.fetch_add(1, Ordering::SeqCst);
+            match self.bodies.get(idx) {
+                Some(body) => wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body.clone()),
+                None => panic!("no chat completion response for index {idx}"),
+            }
+        }
+    }
+
+    let chat_seq = ChatSeqResponder {
+        num_calls: AtomicUsize::new(0),
+        bodies: vec![sse_tool_call, sse_final],
+    };
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/chat/completions"))
+        .respond_with(chat_seq)
+        .expect(2)
+        .mount(&server)
+        .await;
 
     let rmcp_test_server_bin = stdio_server_bin()?;
 
     let fixture = test_codex()
-        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_config(move |config| {
+            config.model_provider.wire_api = codex_core::WireApi::Chat;
             let mut servers = config.mcp_servers.get().clone();
             servers.insert(
                 server_name.to_string(),
@@ -455,7 +429,6 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
                         cwd: None,
                     },
                     enabled: true,
-                    required: false,
                     disabled_reason: None,
                     startup_timeout_sec: Some(Duration::from_secs(10)),
                     tool_timeout_sec: None,
@@ -471,13 +444,7 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
         })
         .build(&server)
         .await?;
-
-    fixture
-        .thread_manager
-        .get_models_manager()
-        .list_models(RefreshStrategy::Online)
-        .await;
-    assert_eq!(models_mock.requests().len(), 1);
+    let session_model = fixture.session_configured.model.clone();
 
     fixture
         .codex
@@ -489,40 +456,78 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
             final_output_json_schema: None,
             cwd: fixture.cwd.path().to_path_buf(),
             approval_policy: AskForApproval::Never,
-            sandbox_policy: SandboxPolicy::new_read_only_policy(),
-            model: text_only_model_slug.to_string(),
+            sandbox_policy: SandboxPolicy::ReadOnly,
+            model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
-    wait_for_event(&fixture.codex, |ev| {
+    let begin_event = wait_for_event(&fixture.codex, |ev| {
         matches!(ev, EventMsg::McpToolCallBegin(_))
     })
     .await;
-    wait_for_event(&fixture.codex, |ev| {
+    let EventMsg::McpToolCallBegin(begin) = begin_event else {
+        unreachable!("begin");
+    };
+    assert_eq!(
+        begin,
+        McpToolCallBeginEvent {
+            call_id: call_id.to_string(),
+            invocation: McpInvocation {
+                server: server_name.to_string(),
+                tool: "image".to_string(),
+                arguments: Some(json!({})),
+            },
+        },
+    );
+
+    let end_event = wait_for_event(&fixture.codex, |ev| {
         matches!(ev, EventMsg::McpToolCallEnd(_))
     })
     .await;
+    let EventMsg::McpToolCallEnd(end) = end_event else {
+        unreachable!("end");
+    };
+    assert!(end.result.as_ref().is_ok(), "tool call should succeed");
+
     wait_for_event(&fixture.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
-    let output_item = final_mock.single_request().function_call_output(call_id);
-    let output_text = output_item
-        .get("output")
-        .and_then(Value::as_str)
-        .expect("function_call_output output should be a JSON string");
-    let output_json: Value = serde_json::from_str(output_text)
-        .expect("function_call_output output should be valid JSON");
+    // Chat Completions assertion: the second POST should include a tool role message
+    // with an array `content` containing an item with the expected data URL.
+    let all_requests = server.received_requests().await.expect("requests captured");
+    let requests: Vec<_> = all_requests
+        .iter()
+        .filter(|req| req.method == "POST" && req.url.path().ends_with("/chat/completions"))
+        .collect();
+    assert!(requests.len() >= 2, "expected two chat completion calls");
+    let second = requests[1];
+    let body: Value = serde_json::from_slice(&second.body)?;
+    let messages = body
+        .get("messages")
+        .and_then(Value::as_array)
+        .cloned()
+        .expect("messages array");
+    let tool_msg = messages
+        .iter()
+        .find(|m| {
+            m.get("role") == Some(&json!("tool")) && m.get("tool_call_id") == Some(&json!(call_id))
+        })
+        .cloned()
+        .expect("tool message present");
     assert_eq!(
-        output_json,
-        json!([{
-            "type": "text",
-            "text": "<image content omitted because you do not support image input>"
-        }])
+        tool_msg,
+        json!({
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": [{"type": "image_url", "image_url": {"url": OPENAI_PNG}}]
+        })
     );
-    server.verify().await;
+
     Ok(())
 }
 
@@ -601,12 +606,14 @@ async fn stdio_server_propagates_whitelisted_env_vars() -> anyhow::Result<()> {
             final_output_json_schema: None,
             cwd: fixture.cwd.path().to_path_buf(),
             approval_policy: AskForApproval::Never,
-            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            sandbox_policy: SandboxPolicy::ReadOnly,
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -760,12 +767,14 @@ async fn streamable_http_tool_call_round_trip() -> anyhow::Result<()> {
             final_output_json_schema: None,
             cwd: fixture.cwd.path().to_path_buf(),
             approval_policy: AskForApproval::Never,
-            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            sandbox_policy: SandboxPolicy::ReadOnly,
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -840,31 +849,8 @@ async fn streamable_http_tool_call_round_trip() -> anyhow::Result<()> {
 /// This test writes to a fallback credentials file in CODEX_HOME.
 /// Ideally, we wouldn't need to serialize the test but it's much more cumbersome to wire CODEX_HOME through the code.
 #[serial(codex_home)]
-#[test]
-fn streamable_http_with_oauth_round_trip() -> anyhow::Result<()> {
-    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
-
-    let handle = std::thread::Builder::new()
-        .name("streamable_http_with_oauth_round_trip".to_string())
-        .stack_size(TEST_STACK_SIZE_BYTES)
-        .spawn(|| -> anyhow::Result<()> {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
-                .enable_all()
-                .build()?;
-            runtime.block_on(streamable_http_with_oauth_round_trip_impl())
-        })?;
-
-    match handle.join() {
-        Ok(result) => result,
-        Err(_) => Err(anyhow::anyhow!(
-            "streamable_http_with_oauth_round_trip thread panicked"
-        )),
-    }
-}
-
-#[allow(clippy::expect_used)]
-async fn streamable_http_with_oauth_round_trip_impl() -> anyhow::Result<()> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn streamable_http_with_oauth_round_trip() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -935,11 +921,6 @@ async fn streamable_http_with_oauth_round_trip_impl() -> anyhow::Result<()> {
 
     let fixture = test_codex()
         .with_config(move |config| {
-            // This test seeds OAuth tokens in CODEX_HOME/.credentials.json and
-            // validates file-backed OAuth loading. Force file mode so Linux
-            // keyring backend quirks do not affect this test.
-            config.mcp_oauth_credentials_store_mode = serde_json::from_value(json!("file"))
-                .expect("`file` should deserialize as OAuthCredentialsStoreMode");
             let mut servers = config.mcp_servers.get().clone();
             servers.insert(
                 server_name.to_string(),
@@ -979,12 +960,14 @@ async fn streamable_http_with_oauth_round_trip_impl() -> anyhow::Result<()> {
             final_output_json_schema: None,
             cwd: fixture.cwd.path().to_path_buf(),
             approval_policy: AskForApproval::Never,
-            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            sandbox_policy: SandboxPolicy::ReadOnly,
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 

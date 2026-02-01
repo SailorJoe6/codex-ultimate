@@ -19,6 +19,8 @@ use crate::config_types::ModeKind;
 use crate::config_types::Personality;
 use crate::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use crate::config_types::WindowsSandboxLevel;
+use crate::custom_commands::CustomCommand;
+use crate::custom_commands::CustomCommandErrorInfo;
 use crate::custom_prompts::CustomPrompt;
 use crate::dynamic_tools::DynamicToolCallRequest;
 use crate::dynamic_tools::DynamicToolResponse;
@@ -147,6 +149,14 @@ pub enum Op {
         /// Optional personality override for this turn.
         #[serde(skip_serializing_if = "Option::is_none")]
         personality: Option<Personality>,
+
+        /// Optional tool allow-list for this turn.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        allowed_tools: Option<Vec<String>>,
+
+        /// Optional flag to disable model invocation for this turn.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        disable_model_invocation: Option<bool>,
     },
 
     /// Override parts of the persistent turn context for subsequent turns.
@@ -271,6 +281,9 @@ pub enum Op {
 
     /// Request the list of available custom prompts.
     ListCustomPrompts,
+
+    /// Request the list of available custom slash commands.
+    ListCustomCommands,
 
     /// Request the list of skills for the provided `cwd` values or the session default.
     ListSkills {
@@ -1020,6 +1033,9 @@ pub enum EventMsg {
 
     /// List of custom prompts available to the agent.
     ListCustomPromptsResponse(ListCustomPromptsResponseEvent),
+
+    /// List of custom slash commands available to the agent.
+    ListCustomCommandsResponse(ListCustomCommandsResponseEvent),
 
     /// List of skills available to the agent.
     ListSkillsResponse(ListSkillsResponseEvent),
@@ -2458,6 +2474,13 @@ impl fmt::Display for McpAuthStatus {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct ListCustomPromptsResponseEvent {
     pub custom_prompts: Vec<CustomPrompt>,
+}
+
+/// Response payload for `Op::ListCustomCommands`.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct ListCustomCommandsResponseEvent {
+    pub custom_commands: Vec<CustomCommand>,
+    pub errors: Vec<CustomCommandErrorInfo>,
 }
 
 /// Response payload for `Op::ListSkills`.

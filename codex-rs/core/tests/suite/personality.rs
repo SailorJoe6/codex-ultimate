@@ -100,6 +100,8 @@ async fn user_turn_personality_none_does_not_add_update_message() -> anyhow::Res
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -146,6 +148,8 @@ async fn config_personality_some_sets_instructions_template() -> anyhow::Result<
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -305,6 +309,8 @@ async fn user_turn_personality_some_adds_update_message() -> anyhow::Result<()> 
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -435,6 +441,8 @@ async fn user_turn_personality_same_value_does_not_add_update_message() -> anyho
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -759,6 +767,8 @@ async fn user_turn_personality_remote_model_template_includes_update_message() -
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -793,6 +803,8 @@ async fn user_turn_personality_remote_model_template_includes_update_message() -
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 

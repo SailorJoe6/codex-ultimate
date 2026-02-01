@@ -159,6 +159,8 @@ async fn run_snapshot_command_with_options(
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -245,6 +247,8 @@ async fn run_shell_command_snapshot_with_options(
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -532,6 +536,8 @@ async fn shell_command_snapshot_still_intercepts_apply_patch() -> Result<()> {
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 

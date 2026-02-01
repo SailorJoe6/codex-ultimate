@@ -29,6 +29,7 @@ use bottom_pane_view::BottomPaneView;
 use codex_core::features::Features;
 use codex_core::skills::model::SkillMetadata;
 use codex_file_search::FileMatch;
+use codex_protocol::custom_commands::CustomCommand;
 use codex_protocol::request_user_input::RequestUserInputEvent;
 use codex_protocol::user_input::TextElement;
 use crossterm::event::KeyCode;
@@ -125,6 +126,7 @@ pub(crate) enum CancellationEvent {
 
 pub(crate) use chat_composer::ChatComposer;
 pub(crate) use chat_composer::ChatComposerConfig;
+pub(crate) use chat_composer::CustomCommandOverrides;
 pub(crate) use chat_composer::InputResult;
 use codex_protocol::custom_prompts::CustomPrompt;
 
@@ -730,6 +732,12 @@ impl BottomPane {
     /// Update custom prompts available for the slash popup.
     pub(crate) fn set_custom_prompts(&mut self, prompts: Vec<CustomPrompt>) {
         self.composer.set_custom_prompts(prompts);
+        self.request_redraw();
+    }
+
+    /// Update custom commands available for the slash popup.
+    pub(crate) fn set_custom_commands(&mut self, commands: Vec<CustomCommand>) {
+        self.composer.set_custom_commands(commands);
         self.request_redraw();
     }
 

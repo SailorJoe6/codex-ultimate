@@ -14,13 +14,14 @@ pub use cli::Cli;
 pub use cli::Command;
 pub use cli::ReviewArgs;
 use codex_cloud_requirements::cloud_requirements_loader;
+use codex_common::oss::ensure_oss_provider_ready;
+use codex_common::oss::get_default_model_for_oss_provider;
 use codex_core::AuthManager;
 use codex_core::LMSTUDIO_OSS_PROVIDER_ID;
 use codex_core::NewThread;
 use codex_core::OLLAMA_OSS_PROVIDER_ID;
 use codex_core::ThreadManager;
 use codex_core::auth::enforce_login_restrictions;
-use codex_core::check_execpolicy_for_warnings;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
@@ -29,7 +30,9 @@ use codex_core::config::load_config_as_toml_with_cli_overrides;
 use codex_core::config::resolve_oss_provider;
 use codex_core::config_loader::ConfigLoadError;
 use codex_core::config_loader::format_config_error_with_source;
-use codex_core::format_exec_policy_error_with_source;
+use codex_core::custom_command_expansion::expand_custom_command;
+use codex_core::custom_prompt_expansion::PromptExpansionError;
+use codex_core::custom_prompt_expansion::expand_custom_prompt_text;
 use codex_core::git_info::get_git_repo_root;
 use codex_core::models_manager::manager::RefreshStrategy;
 use codex_core::protocol::AskForApproval;
@@ -39,12 +42,13 @@ use codex_core::protocol::Op;
 use codex_core::protocol::ReviewRequest;
 use codex_core::protocol::ReviewTarget;
 use codex_core::protocol::SessionSource;
+use codex_core::protocol::WarningEvent;
 use codex_protocol::approvals::ElicitationAction;
 use codex_protocol::config_types::SandboxMode;
+use codex_protocol::custom_commands::CustomCommand;
+use codex_protocol::custom_prompts::CustomPrompt;
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use codex_utils_oss::ensure_oss_provider_ready;
-use codex_utils_oss::get_default_model_for_oss_provider;
 use event_processor_with_human_output::EventProcessorWithHumanOutput;
 use event_processor_with_jsonl_output::EventProcessorWithJsonOutput;
 use serde_json::Value;
@@ -207,8 +211,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         .clone()
         .unwrap_or_else(|| "https://chatgpt.com/backend-api/".to_string());
     // TODO(gt): Make cloud requirements failures blocking once we can fail-closed.
-    let cloud_requirements =
-        cloud_requirements_loader(cloud_auth_manager, chatgpt_base_url, codex_home.clone());
+    let cloud_requirements = cloud_requirements_loader(cloud_auth_manager, chatgpt_base_url);
 
     let model_provider = if oss {
         let resolved = resolve_oss_provider(
@@ -251,9 +254,6 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         cwd: resolved_cwd,
         model_provider: model_provider.clone(),
         codex_linux_sandbox_exe,
-        js_repl_node_path: None,
-        js_repl_node_module_dirs: None,
-        zsh_path: None,
         base_instructions: None,
         developer_instructions: None,
         personality: None,
@@ -271,19 +271,6 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         .cloud_requirements(cloud_requirements)
         .build()
         .await?;
-
-    #[allow(clippy::print_stderr)]
-    match check_execpolicy_for_warnings(&config.config_layer_stack).await {
-        Ok(None) => {}
-        Ok(Some(err)) | Err(err) => {
-            eprintln!(
-                "Error loading rules:\n{}",
-                format_exec_policy_error_with_source(&err)
-            );
-            std::process::exit(1);
-        }
-    }
-
     set_default_client_residency_requirement(config.enforce_residency.value());
 
     if let Err(err) = enforce_login_restrictions(&config) {
@@ -331,6 +318,26 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         .map(|(name, _)| name.clone())
         .collect();
 
+    let custom_commands_outcome =
+        codex_core::custom_commands::discover_custom_commands(config.cwd.as_path(), &config).await;
+    for error in &custom_commands_outcome.errors {
+        event_processor.process_event(Event {
+            id: String::new(),
+            msg: EventMsg::Warning(WarningEvent {
+                message: format!(
+                    "Custom command error in {}: {}",
+                    error.path.display(),
+                    error.message
+                ),
+            }),
+        });
+    }
+    let custom_prompts = if let Some(dir) = codex_core::custom_prompts::default_prompts_dir() {
+        codex_core::custom_prompts::discover_prompts_in(&dir).await
+    } else {
+        Vec::new()
+    };
+
     if oss {
         // We're in the oss section, so provider_id should be Some
         // Let's handle None case gracefully though just in case
@@ -349,8 +356,8 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
     }
 
     let default_cwd = config.cwd.to_path_buf();
-    let default_approval_policy = config.permissions.approval_policy.value();
-    let default_sandbox_policy = config.permissions.sandbox_policy.get();
+    let default_approval_policy = config.approval_policy.value();
+    let default_sandbox_policy = config.sandbox_policy.get();
     let default_effort = config.model_reasoning_effort;
     let default_summary = config.model_reasoning_summary;
 
@@ -373,11 +380,10 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         config.codex_home.clone(),
         auth_manager.clone(),
         SessionSource::Exec,
-        config.model_catalog.clone(),
     ));
     let default_model = thread_manager
         .get_models_manager()
-        .get_default_model(&config.model, RefreshStrategy::OnlineIfUncached)
+        .get_default_model(&config.model, &config, RefreshStrategy::OnlineIfUncached)
         .await;
 
     // Handle resume subcommand by resolving a rollout path and using explicit resume API.
@@ -398,6 +404,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
     } else {
         thread_manager.start_thread(config.clone()).await?
     };
+    let mut custom_command_overrides: Option<CustomCommandOverrides> = None;
     let (initial_operation, prompt_summary) = match (command, prompt, images) {
         (Some(ExecCommand::Review(review_cli)), _, _) => {
             let review_request = build_review_request(review_cli)?;
@@ -416,14 +423,23 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
                     }
                 })
                 .or(root_prompt);
-            let prompt_text = resolve_prompt(prompt_arg);
+            let prompt_customization = expand_prompt_with_customizations(
+                resolve_prompt(prompt_arg),
+                &custom_commands_outcome.commands,
+                &custom_prompts,
+            )
+            .map_err(prompt_expansion_failure)?;
+            custom_command_overrides = prompt_customization
+                .command
+                .as_ref()
+                .map(CustomCommandOverrides::from);
             let mut items: Vec<UserInput> = imgs
                 .into_iter()
                 .chain(args.images.into_iter())
                 .map(|path| UserInput::LocalImage { path })
                 .collect();
             items.push(UserInput::Text {
-                text: prompt_text.clone(),
+                text: prompt_customization.text.clone(),
                 // CLI input doesn't track UI element ranges, so none are available here.
                 text_elements: Vec::new(),
             });
@@ -433,17 +449,26 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
                     items,
                     output_schema,
                 },
-                prompt_text,
+                prompt_customization.text,
             )
         }
         (None, root_prompt, imgs) => {
-            let prompt_text = resolve_prompt(root_prompt);
+            let prompt_customization = expand_prompt_with_customizations(
+                resolve_prompt(root_prompt),
+                &custom_commands_outcome.commands,
+                &custom_prompts,
+            )
+            .map_err(prompt_expansion_failure)?;
+            custom_command_overrides = prompt_customization
+                .command
+                .as_ref()
+                .map(CustomCommandOverrides::from);
             let mut items: Vec<UserInput> = imgs
                 .into_iter()
                 .map(|path| UserInput::LocalImage { path })
                 .collect();
             items.push(UserInput::Text {
-                text: prompt_text.clone(),
+                text: prompt_customization.text.clone(),
                 // CLI input doesn't track UI element ranges, so none are available here.
                 text_elements: Vec::new(),
             });
@@ -453,7 +478,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
                     items,
                     output_schema,
                 },
-                prompt_text,
+                prompt_customization.text,
             )
         }
     };
@@ -515,18 +540,33 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
             items,
             output_schema,
         } => {
+            let (model, allowed_tools, disable_model_invocation) =
+                if let Some(overrides) = custom_command_overrides.as_ref() {
+                    (
+                        overrides
+                            .model
+                            .clone()
+                            .unwrap_or_else(|| default_model.clone()),
+                        overrides.allowed_tools.clone(),
+                        overrides.disable_model_invocation,
+                    )
+                } else {
+                    (default_model.clone(), None, None)
+                };
             let task_id = thread
                 .submit(Op::UserTurn {
                     items,
                     cwd: default_cwd,
                     approval_policy: default_approval_policy,
                     sandbox_policy: default_sandbox_policy.clone(),
-                    model: default_model,
+                    model,
                     effort: default_effort,
                     summary: default_summary,
                     final_output_json_schema: output_schema,
                     collaboration_mode: None,
                     personality: None,
+                    allowed_tools,
+                    disable_model_invocation,
                 })
                 .await?;
             info!("Sent prompt with event ID: {task_id}");
@@ -550,14 +590,6 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
             thread,
             event,
         } = envelope;
-        if matches!(event.msg, EventMsg::Error(_)) {
-            error_seen = true;
-        }
-        if shutdown_requested
-            && !matches!(&event.msg, EventMsg::ShutdownComplete | EventMsg::Error(_))
-        {
-            continue;
-        }
         if let EventMsg::ElicitationRequest(ev) = &event.msg {
             // Automatically cancel elicitation requests in exec mode.
             thread
@@ -581,6 +613,9 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
                 thread.submit(Op::Shutdown).await?;
                 shutdown_requested = true;
             }
+        }
+        if matches!(event.msg, EventMsg::Error(_)) {
+            error_seen = true;
         }
         if thread_id != primary_thread_id && matches!(&event.msg, EventMsg::TurnComplete(_)) {
             continue;
@@ -657,7 +692,7 @@ async fn resolve_resume_path(
             Some(config.cwd.as_path())
         };
         match codex_core::RolloutRecorder::find_latest_thread_path(
-            config,
+            &config.codex_home,
             1,
             None,
             codex_core::ThreadSortKey::UpdatedAt,
@@ -784,6 +819,56 @@ fn decode_utf16(
         .collect();
 
     String::from_utf16(&units).map_err(|_| PromptDecodeError::InvalidUtf16 { encoding })
+}
+
+fn prompt_expansion_failure(err: PromptExpansionError) -> anyhow::Error {
+    anyhow::anyhow!(err.user_message())
+}
+
+#[derive(Debug, Clone)]
+struct PromptCustomization {
+    text: String,
+    command: Option<CustomCommand>,
+}
+
+#[derive(Debug, Clone)]
+struct CustomCommandOverrides {
+    allowed_tools: Option<Vec<String>>,
+    model: Option<String>,
+    disable_model_invocation: Option<bool>,
+}
+
+impl From<&CustomCommand> for CustomCommandOverrides {
+    fn from(command: &CustomCommand) -> Self {
+        Self {
+            allowed_tools: command.allowed_tools.clone(),
+            model: command.model.clone(),
+            disable_model_invocation: command.disable_model_invocation,
+        }
+    }
+}
+
+fn expand_prompt_with_customizations(
+    prompt_text: String,
+    commands: &[CustomCommand],
+    prompts: &[CustomPrompt],
+) -> Result<PromptCustomization, PromptExpansionError> {
+    if let Some(expanded) = expand_custom_prompt_text(&prompt_text, prompts)? {
+        return Ok(PromptCustomization {
+            text: expanded,
+            command: None,
+        });
+    }
+    if let Some(expanded) = expand_custom_command(&prompt_text, commands) {
+        return Ok(PromptCustomization {
+            text: expanded.text,
+            command: Some(expanded.command),
+        });
+    }
+    Ok(PromptCustomization {
+        text: prompt_text,
+        command: None,
+    })
 }
 
 fn resolve_prompt(prompt_arg: Option<String>) -> String {

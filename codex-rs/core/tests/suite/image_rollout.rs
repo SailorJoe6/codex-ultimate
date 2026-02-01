@@ -129,6 +129,8 @@ async fn copy_paste_local_image_persists_rollout_request_shape() -> anyhow::Resu
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -211,6 +213,8 @@ async fn drag_drop_image_persists_rollout_request_shape() -> anyhow::Result<()> 
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
