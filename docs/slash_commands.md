@@ -4,7 +4,7 @@ For an overview of Codex CLI slash commands, see [this documentation](https://de
 
 ## Custom slash commands
 
-Codex also supports custom slash commands stored as Markdown files in:
+Codex Ultimate also supports custom slash commands stored as Markdown files in:
 
 - Project scope: `<project-root>/.codex/commands/`
 - User scope: `~/.codex/commands/`
