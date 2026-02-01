@@ -195,22 +195,41 @@ async fn discover_commands_in_root(
 
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
-            let meta = match entry.metadata().await {
-                Ok(meta) => meta,
+            let file_type = match entry.file_type().await {
+                Ok(file_type) => file_type,
                 Err(err) => {
                     errors.push(CustomCommandErrorInfo {
                         path,
-                        message: format!("failed to read command metadata: {err}"),
+                        message: format!("failed to read command file type: {err}"),
                     });
                     continue;
                 }
             };
 
-            if meta.is_dir() {
+            if file_type.is_dir() {
                 queue.push(path);
                 continue;
             }
-            if !meta.is_file() {
+
+            let mut is_file = file_type.is_file();
+            if file_type.is_symlink() {
+                let meta = match fs::metadata(&path).await {
+                    Ok(meta) => meta,
+                    Err(err) => {
+                        errors.push(CustomCommandErrorInfo {
+                            path,
+                            message: format!("failed to resolve command symlink: {err}"),
+                        });
+                        continue;
+                    }
+                };
+                if meta.is_dir() {
+                    continue;
+                }
+                is_file = meta.is_file();
+            }
+
+            if !is_file {
                 continue;
             }
             if !is_markdown(&path) {
@@ -599,5 +618,38 @@ mod tests {
         assert_eq!(command.model, Some("gpt-4.1".to_string()));
         assert_eq!(command.disable_model_invocation, Some(true));
         assert_eq!(command.content, "run".to_string());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn discovers_symlinked_commands() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempdir().expect("tempdir");
+        let codex_home = tmp.path().join("codex_home");
+        fs::create_dir_all(&codex_home).expect("codex home");
+        let config = crate::config::test_config();
+
+        let user_root = codex_home.join("commands");
+        fs::create_dir_all(&user_root).expect("user commands");
+
+        let target_root = tmp.path().join("targets");
+        fs::create_dir_all(&target_root).expect("targets root");
+        let target_path = target_root.join("source.md");
+        fs::write(&target_path, "hello").expect("target");
+
+        let link_path = user_root.join("linked.md");
+        symlink(&target_path, &link_path).expect("symlink");
+
+        let outcome =
+            discover_custom_commands_with_roots(tmp.path(), &config, Some(user_root)).await;
+
+        let names: Vec<String> = outcome
+            .commands
+            .iter()
+            .map(|cmd| cmd.name.clone())
+            .collect();
+        assert_eq!(names, vec!["linked".to_string()]);
+        assert_eq!(outcome.commands[0].content, "hello".to_string());
     }
 }
