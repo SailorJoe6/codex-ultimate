@@ -520,6 +520,8 @@ async fn user_turn_personality_skips_if_feature_disabled() -> anyhow::Result<()>
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -554,6 +556,8 @@ async fn user_turn_personality_skips_if_feature_disabled() -> anyhow::Result<()>
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -665,6 +669,8 @@ async fn ignores_remote_personality_if_remote_models_disabled() -> anyhow::Resul
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -781,6 +787,8 @@ async fn remote_model_friendly_personality_instructions_with_feature() -> anyhow
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: Some(Personality::Friendly),
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 

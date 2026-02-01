@@ -233,15 +233,15 @@ impl CommandPopup {
                     CommandItem::CustomCommand(i) => {
                         let command = &self.custom_commands[i];
                         let mut parts = Vec::new();
-                        if let Some(description) = command.description.as_ref() {
-                            if !description.trim().is_empty() {
-                                parts.push(description.clone());
-                            }
+                        if let Some(description) = command.description.as_ref()
+                            && !description.trim().is_empty()
+                        {
+                            parts.push(description.clone());
                         }
-                        if let Some(argument_hint) = command.argument_hint.as_ref() {
-                            if !argument_hint.trim().is_empty() {
-                                parts.push(argument_hint.clone());
-                            }
+                        if let Some(argument_hint) = command.argument_hint.as_ref()
+                            && !argument_hint.trim().is_empty()
+                        {
+                            parts.push(argument_hint.clone());
                         }
                         if parts.is_empty() {
                             parts.push("custom command".to_string());
@@ -608,6 +608,7 @@ mod tests {
     #[test]
     fn plan_command_visible_when_collaboration_modes_enabled() {
         let mut popup = CommandPopup::new(
+            Vec::new(),
             Vec::new(),
             CommandPopupFlags {
                 collaboration_modes_enabled: true,

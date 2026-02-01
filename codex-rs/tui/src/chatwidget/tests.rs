@@ -470,7 +470,6 @@ async fn interrupted_turn_restores_queued_messages_with_images_and_elements() {
         text_elements: first_elements,
         mention_paths: HashMap::new(),
         command_overrides: None,
-        command_overrides: None,
     });
     chat.queued_user_messages.push_back(UserMessage {
         text: second_text,
@@ -480,7 +479,6 @@ async fn interrupted_turn_restores_queued_messages_with_images_and_elements() {
         }],
         text_elements: second_elements,
         mention_paths: HashMap::new(),
-        command_overrides: None,
         command_overrides: None,
     });
     chat.refresh_queued_user_messages();
@@ -611,7 +609,6 @@ async fn remap_placeholders_uses_attachment_labels() {
         local_images: attachments,
         mention_paths: HashMap::new(),
         command_overrides: None,
-        command_overrides: None,
     };
     let mut next_label = 3usize;
     let remapped = remap_placeholders_for_message(message, &mut next_label);
@@ -673,7 +670,6 @@ async fn remap_placeholders_uses_byte_ranges_when_placeholder_missing() {
         text_elements: elements,
         local_images: attachments,
         mention_paths: HashMap::new(),
-        command_overrides: None,
         command_overrides: None,
     };
     let mut next_label = 3usize;

@@ -380,6 +380,8 @@ async fn plan_mode_emits_plan_item_from_proposed_plan_block() -> anyhow::Result<
             summary: codex_protocol::config_types::ReasoningSummary::Auto,
             collaboration_mode: Some(collaboration_mode),
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -455,6 +457,8 @@ async fn plan_mode_strips_plan_from_agent_messages() -> anyhow::Result<()> {
             summary: codex_protocol::config_types::ReasoningSummary::Auto,
             collaboration_mode: Some(collaboration_mode),
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -551,6 +555,8 @@ async fn plan_mode_handles_missing_plan_close_tag() -> anyhow::Result<()> {
             summary: codex_protocol::config_types::ReasoningSummary::Auto,
             collaboration_mode: Some(collaboration_mode),
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 

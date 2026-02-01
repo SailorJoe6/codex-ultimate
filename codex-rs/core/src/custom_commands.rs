@@ -129,21 +129,21 @@ fn project_root_markers_from_config(config: &Config) -> Vec<String> {
     let TomlValue::Table(table) = merged else {
         return DEFAULT_PROJECT_ROOT_MARKERS
             .iter()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
     };
 
     let Some(markers_value) = table.get("project_root_markers") else {
         return DEFAULT_PROJECT_ROOT_MARKERS
             .iter()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
     };
 
     let TomlValue::Array(markers) = markers_value else {
         return DEFAULT_PROJECT_ROOT_MARKERS
             .iter()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
     };
 
@@ -152,7 +152,7 @@ fn project_root_markers_from_config(config: &Config) -> Vec<String> {
         let Some(marker) = marker.as_str() else {
             return DEFAULT_PROJECT_ROOT_MARKERS
                 .iter()
-                .map(|s| s.to_string())
+                .map(std::string::ToString::to_string)
                 .collect();
         };
         out.push(marker.to_string());
