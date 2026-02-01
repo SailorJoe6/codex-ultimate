@@ -775,6 +775,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
             | EventMsg::GetHistoryEntryResponse(_)
             | EventMsg::McpListToolsResponse(_)
             | EventMsg::ListCustomPromptsResponse(_)
+            | EventMsg::ListCustomCommandsResponse(_)
             | EventMsg::ListSkillsResponse(_)
             | EventMsg::ListRemoteSkillsResponse(_)
             | EventMsg::RemoteSkillDownloaded(_)

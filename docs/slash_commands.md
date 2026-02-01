@@ -21,6 +21,12 @@ Custom commands can define optional YAML frontmatter fields:
 - `model`
 - `disable-model-invocation`
 
+When set, these fields affect how the command runs:
+
+- `allowed-tools` limits the tool list for that command to the named tools (built-in, MCP, and dynamic tools all use the same names shown in `/mcp` or tool outputs).
+- `model` overrides the model used for that command.
+- `disable-model-invocation` skips contacting the model and completes the turn after recording the user message.
+
 Command bodies support Claude-style placeholders:
 
 - `$ARGUMENTS` for all arguments joined by spaces

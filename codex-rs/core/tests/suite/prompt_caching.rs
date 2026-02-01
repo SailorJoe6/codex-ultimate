@@ -634,6 +634,8 @@ async fn per_turn_overrides_keep_cached_prefix_and_key_constant() -> anyhow::Res
             collaboration_mode: None,
             final_output_json_schema: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
@@ -749,6 +751,8 @@ async fn send_user_turn_with_no_changes_does_not_send_environment_context() -> a
             collaboration_mode: None,
             final_output_json_schema: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
@@ -768,6 +772,8 @@ async fn send_user_turn_with_no_changes_does_not_send_environment_context() -> a
             collaboration_mode: None,
             final_output_json_schema: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
@@ -857,6 +863,8 @@ async fn send_user_turn_with_changes_sends_environment_context() -> anyhow::Resu
             collaboration_mode: None,
             final_output_json_schema: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
@@ -876,6 +884,8 @@ async fn send_user_turn_with_changes_sends_environment_context() -> anyhow::Resu
             collaboration_mode: None,
             final_output_json_schema: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;

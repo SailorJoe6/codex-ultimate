@@ -159,6 +159,7 @@ use crate::bottom_pane::BottomPaneParams;
 use crate::bottom_pane::CancellationEvent;
 use crate::bottom_pane::CollaborationModeIndicator;
 use crate::bottom_pane::ColumnWidthMode;
+use crate::bottom_pane::CustomCommandOverrides;
 use crate::bottom_pane::DOUBLE_PRESS_QUIT_SHORTCUT_ENABLED;
 use crate::bottom_pane::ExperimentalFeatureItem;
 use crate::bottom_pane::ExperimentalFeaturesView;
@@ -642,6 +643,7 @@ pub(crate) struct UserMessage {
     local_images: Vec<LocalImageAttachment>,
     text_elements: Vec<TextElement>,
     mention_paths: HashMap<String, String>,
+    command_overrides: Option<CustomCommandOverrides>,
 }
 
 impl From<String> for UserMessage {
@@ -652,6 +654,7 @@ impl From<String> for UserMessage {
             // Plain text conversion has no UI element ranges.
             text_elements: Vec::new(),
             mention_paths: HashMap::new(),
+            command_overrides: None,
         }
     }
 }
@@ -664,6 +667,7 @@ impl From<&str> for UserMessage {
             // Plain text conversion has no UI element ranges.
             text_elements: Vec::new(),
             mention_paths: HashMap::new(),
+            command_overrides: None,
         }
     }
 }
@@ -690,6 +694,7 @@ pub(crate) fn create_initial_user_message(
             local_images,
             text_elements,
             mention_paths: HashMap::new(),
+            command_overrides: None,
         })
     }
 }
@@ -704,6 +709,7 @@ fn remap_placeholders_for_message(message: UserMessage, next_label: &mut usize) 
         text_elements,
         local_images,
         mention_paths,
+        command_overrides,
     } = message;
     if local_images.is_empty() {
         return UserMessage {
@@ -711,6 +717,7 @@ fn remap_placeholders_for_message(message: UserMessage, next_label: &mut usize) 
             text_elements,
             local_images,
             mention_paths,
+            command_overrides,
         };
     }
 
@@ -766,6 +773,7 @@ fn remap_placeholders_for_message(message: UserMessage, next_label: &mut usize) 
         local_images: remapped_images,
         text_elements: rebuilt_elements,
         mention_paths,
+        command_overrides,
     }
 }
 
@@ -1671,6 +1679,7 @@ impl ChatWidget {
             text_elements: self.bottom_pane.composer_text_elements(),
             local_images: self.bottom_pane.composer_local_images(),
             mention_paths: HashMap::new(),
+            command_overrides: None,
         };
 
         let mut to_merge: Vec<UserMessage> = self.queued_user_messages.drain(..).collect();
@@ -1683,6 +1692,7 @@ impl ChatWidget {
             text_elements: Vec::new(),
             local_images: Vec::new(),
             mention_paths: HashMap::new(),
+            command_overrides: None,
         };
         let mut combined_offset = 0usize;
         let mut next_image_label = 1usize;
@@ -3022,6 +3032,7 @@ impl ChatWidget {
                 InputResult::Submitted {
                     text,
                     text_elements,
+                    command_overrides,
                 } => {
                     let user_message = UserMessage {
                         text,
@@ -3030,6 +3041,8 @@ impl ChatWidget {
                             .take_recent_submission_images_with_placeholders(),
                         text_elements,
                         mention_paths: self.bottom_pane.take_mention_paths(),
+                        command_overrides,
+                        command_overrides,
                     };
                     if self.is_session_configured() && !self.is_plan_streaming_in_tui() {
                         // Submitted is only emitted when steer is enabled.
@@ -3045,6 +3058,7 @@ impl ChatWidget {
                 InputResult::Queued {
                     text,
                     text_elements,
+                    command_overrides,
                 } => {
                     let user_message = UserMessage {
                         text,
@@ -3053,6 +3067,8 @@ impl ChatWidget {
                             .take_recent_submission_images_with_placeholders(),
                         text_elements,
                         mention_paths: self.bottom_pane.take_mention_paths(),
+                        command_overrides,
+                        command_overrides,
                     };
                     self.queue_user_message(user_message);
                 }
@@ -3559,6 +3575,9 @@ impl ChatWidget {
             local_images,
             text_elements,
             mention_paths,
+            command_overrides,
+            mention_paths,
+            command_overrides,
         } = user_message;
         if text.is_empty() && local_images.is_empty() {
             return;
@@ -3630,6 +3649,15 @@ impl ChatWidget {
         }
 
         let effective_mode = self.effective_collaboration_mode();
+        let effective_mode = if let Some(overrides) = command_overrides.as_ref() {
+            if overrides.model.is_some() {
+                effective_mode.with_updates(overrides.model.clone(), None, None)
+            } else {
+                effective_mode
+            }
+        } else {
+            effective_mode
+        };
         let collaboration_mode = if self.collaboration_modes_enabled() {
             self.active_collaboration_mask
                 .as_ref()
@@ -3653,6 +3681,12 @@ impl ChatWidget {
             final_output_json_schema: None,
             collaboration_mode,
             personality,
+            allowed_tools: command_overrides
+                .as_ref()
+                .and_then(|o| o.allowed_tools.clone()),
+            disable_model_invocation: command_overrides
+                .as_ref()
+                .and_then(|o| o.disable_model_invocation),
         };
 
         self.codex_op_tx.send(op).unwrap_or_else(|e| {

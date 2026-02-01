@@ -1,3 +1,4 @@
+use codex_protocol::custom_commands::CustomCommand;
 use codex_protocol::custom_prompts::CustomPrompt;
 use codex_protocol::custom_prompts::PROMPTS_CMD_PREFIX;
 use codex_protocol::user_input::ByteRange;
@@ -95,6 +96,12 @@ pub struct PromptArg {
 pub struct PromptExpansion {
     pub text: String,
     pub text_elements: Vec<TextElement>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CustomCommandExpansion {
+    pub expansion: PromptExpansion,
+    pub command: CustomCommand,
 }
 
 /// Parse positional arguments using shlex semantics (supports quoted tokens).
@@ -250,6 +257,40 @@ pub fn expand_custom_prompt(
         &prompt.content,
         &pos_args,
     )))
+}
+
+/// Expand a custom slash command that uses `$ARGUMENTS` or `$1..$9`.
+///
+/// Returns `None` if the text does not start with a known custom command.
+pub fn expand_custom_command(
+    text: &str,
+    text_elements: &[TextElement],
+    custom_commands: &[CustomCommand],
+) -> Option<CustomCommandExpansion> {
+    let Some((name, rest, rest_offset)) = parse_slash_name(text) else {
+        return None;
+    };
+    let command = custom_commands
+        .iter()
+        .find(|command| command.name == name)?;
+    let local_elements: Vec<TextElement> = text_elements
+        .iter()
+        .filter_map(|elem| {
+            let mut shifted = shift_text_element_left(elem, rest_offset)?;
+            if shifted.byte_range.start >= rest.len() {
+                return None;
+            }
+            let end = shifted.byte_range.end.min(rest.len());
+            shifted.byte_range.end = end;
+            (shifted.byte_range.start < shifted.byte_range.end).then_some(shifted)
+        })
+        .collect();
+    let pos_args = parse_positional_args(rest, &local_elements);
+    let expansion = expand_numeric_placeholders(&command.content, &pos_args);
+    Some(CustomCommandExpansion {
+        expansion,
+        command: command.clone(),
+    })
 }
 
 /// Detect whether `content` contains numeric placeholders ($1..$9) or `$ARGUMENTS`.
@@ -607,6 +648,54 @@ mod tests {
                 text: "Pair Alice Smith with dev-main".to_string(),
                 text_elements: Vec::new(),
             })
+        );
+    }
+
+    #[test]
+    fn expand_custom_command_uses_positional_args() {
+        let commands = vec![CustomCommand {
+            name: "deploy".to_string(),
+            path: "/tmp/deploy.md".to_string().into(),
+            content: "First:$1 All:$ARGUMENTS".to_string(),
+            description: None,
+            argument_hint: None,
+            allowed_tools: None,
+            model: None,
+            disable_model_invocation: None,
+            scope: codex_protocol::custom_commands::CustomCommandScope::User,
+            scope_subdir: None,
+        }];
+        let expanded = expand_custom_command("/deploy prod us-west", &[], &commands).unwrap();
+        assert_eq!(
+            expanded.expansion,
+            PromptExpansion {
+                text: "First:prod All:prod us-west".to_string(),
+                text_elements: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn expand_custom_command_preserves_double_dollar() {
+        let commands = vec![CustomCommand {
+            name: "price".to_string(),
+            path: "/tmp/price.md".to_string().into(),
+            content: "Cost $$1, token $1".to_string(),
+            description: None,
+            argument_hint: None,
+            allowed_tools: None,
+            model: None,
+            disable_model_invocation: None,
+            scope: codex_protocol::custom_commands::CustomCommandScope::User,
+            scope_subdir: None,
+        }];
+        let expanded = expand_custom_command("/price usd", &[], &commands).unwrap();
+        assert_eq!(
+            expanded.expansion,
+            PromptExpansion {
+                text: "Cost $$1, token usd".to_string(),
+                text_elements: Vec::new(),
+            }
         );
     }
 

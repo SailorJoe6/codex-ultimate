@@ -10,6 +10,8 @@ use super::slash_commands;
 use crate::render::Insets;
 use crate::render::RectExt;
 use crate::slash_command::SlashCommand;
+use codex_protocol::custom_commands::CustomCommand;
+use codex_protocol::custom_commands::CustomCommandScope;
 use codex_protocol::custom_prompts::CustomPrompt;
 use codex_protocol::custom_prompts::PROMPTS_CMD_PREFIX;
 use std::collections::HashSet;
@@ -23,6 +25,8 @@ const ALIAS_COMMANDS: &[SlashCommand] = &[SlashCommand::Quit, SlashCommand::Appr
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CommandItem {
     Builtin(SlashCommand),
+    // Index into `custom_commands`
+    CustomCommand(usize),
     // Index into `prompts`
     UserPrompt(usize),
 }
@@ -30,6 +34,7 @@ pub(crate) enum CommandItem {
 pub(crate) struct CommandPopup {
     command_filter: String,
     builtins: Vec<(&'static str, SlashCommand)>,
+    custom_commands: Vec<CustomCommand>,
     prompts: Vec<CustomPrompt>,
     state: ScrollState,
 }
@@ -43,7 +48,11 @@ pub(crate) struct CommandPopupFlags {
 }
 
 impl CommandPopup {
-    pub(crate) fn new(mut prompts: Vec<CustomPrompt>, flags: CommandPopupFlags) -> Self {
+    pub(crate) fn new(
+        mut prompts: Vec<CustomPrompt>,
+        mut custom_commands: Vec<CustomCommand>,
+        flags: CommandPopupFlags,
+    ) -> Self {
         // Keep built-in availability in sync with the composer.
         let builtins = slash_commands::builtins_for_input(
             flags.collaboration_modes_enabled,
@@ -55,9 +64,11 @@ impl CommandPopup {
         let exclude: HashSet<String> = builtins.iter().map(|(n, _)| (*n).to_string()).collect();
         prompts.retain(|p| !exclude.contains(&p.name));
         prompts.sort_by(|a, b| a.name.cmp(&b.name));
+        custom_commands.sort_by(|a, b| a.name.cmp(&b.name));
         Self {
             command_filter: String::new(),
             builtins,
+            custom_commands,
             prompts,
             state: ScrollState::new(),
         }
@@ -74,8 +85,17 @@ impl CommandPopup {
         self.prompts = prompts;
     }
 
+    pub(crate) fn set_custom_commands(&mut self, mut commands: Vec<CustomCommand>) {
+        commands.sort_by(|a, b| a.name.cmp(&b.name));
+        self.custom_commands = commands;
+    }
+
     pub(crate) fn prompt(&self, idx: usize) -> Option<&CustomPrompt> {
         self.prompts.get(idx)
+    }
+
+    pub(crate) fn custom_command(&self, idx: usize) -> Option<&CustomCommand> {
+        self.custom_commands.get(idx)
     }
 
     /// Update the filter string based on the current composer text. The text
@@ -132,6 +152,10 @@ impl CommandPopup {
                 }
                 out.push((CommandItem::Builtin(*cmd), None));
             }
+            // Then custom commands, already sorted by name.
+            for idx in 0..self.custom_commands.len() {
+                out.push((CommandItem::CustomCommand(idx), None));
+            }
             // Then prompts, already sorted by name.
             for idx in 0..self.prompts.len() {
                 out.push((CommandItem::UserPrompt(idx), None));
@@ -170,6 +194,9 @@ impl CommandPopup {
         for (_, cmd) in self.builtins.iter() {
             push_match(CommandItem::Builtin(*cmd), cmd.command(), None, 0);
         }
+        for (idx, command) in self.custom_commands.iter().enumerate() {
+            push_match(CommandItem::CustomCommand(idx), &command.name, None, 0);
+        }
         // Support both search styles:
         // - Typing "name" should surface "/prompts:name" results.
         // - Typing "prompts:name" should also work.
@@ -202,6 +229,30 @@ impl CommandPopup {
                 let (name, description) = match item {
                     CommandItem::Builtin(cmd) => {
                         (format!("/{}", cmd.command()), cmd.description().to_string())
+                    }
+                    CommandItem::CustomCommand(i) => {
+                        let command = &self.custom_commands[i];
+                        let mut parts = Vec::new();
+                        if let Some(description) = command.description.as_ref() {
+                            if !description.trim().is_empty() {
+                                parts.push(description.clone());
+                            }
+                        }
+                        if let Some(argument_hint) = command.argument_hint.as_ref() {
+                            if !argument_hint.trim().is_empty() {
+                                parts.push(argument_hint.clone());
+                            }
+                        }
+                        if parts.is_empty() {
+                            parts.push("custom command".to_string());
+                        }
+                        parts.push(scope_label(command));
+                        let description = if parts.is_empty() {
+                            "custom command".to_string()
+                        } else {
+                            parts.join(" · ")
+                        };
+                        (format!("/{}", command.name), description)
                     }
                     CommandItem::UserPrompt(i) => {
                         let prompt = &self.prompts[i];
@@ -252,6 +303,17 @@ impl CommandPopup {
     }
 }
 
+fn scope_label(command: &CustomCommand) -> String {
+    let scope = match command.scope {
+        CustomCommandScope::Project => "project",
+        CustomCommandScope::User => "user",
+    };
+    match command.scope_subdir.as_deref() {
+        Some(subdir) if !subdir.is_empty() => format!("{scope}:{subdir}"),
+        _ => scope.to_string(),
+    }
+}
+
 impl WidgetRef for CommandPopup {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
         let rows = self.rows_from_matches(self.filtered());
@@ -273,7 +335,7 @@ mod tests {
 
     #[test]
     fn filter_includes_init_when_typing_prefix() {
-        let mut popup = CommandPopup::new(Vec::new(), CommandPopupFlags::default());
+        let mut popup = CommandPopup::new(Vec::new(), Vec::new(), CommandPopupFlags::default());
         // Simulate the composer line starting with '/in' so the popup filters
         // matching commands by prefix.
         popup.on_composer_text_change("/in".to_string());
@@ -283,6 +345,7 @@ mod tests {
         let matches = popup.filtered_items();
         let has_init = matches.iter().any(|item| match item {
             CommandItem::Builtin(cmd) => cmd.command() == "init",
+            CommandItem::CustomCommand(_) => false,
             CommandItem::UserPrompt(_) => false,
         });
         assert!(
@@ -293,7 +356,7 @@ mod tests {
 
     #[test]
     fn selecting_init_by_exact_match() {
-        let mut popup = CommandPopup::new(Vec::new(), CommandPopupFlags::default());
+        let mut popup = CommandPopup::new(Vec::new(), Vec::new(), CommandPopupFlags::default());
         popup.on_composer_text_change("/init".to_string());
 
         // When an exact match exists, the selected command should be that
@@ -301,6 +364,9 @@ mod tests {
         let selected = popup.selected_item();
         match selected {
             Some(CommandItem::Builtin(cmd)) => assert_eq!(cmd.command(), "init"),
+            Some(CommandItem::CustomCommand(_)) => {
+                panic!("unexpected custom command selected for '/init'")
+            }
             Some(CommandItem::UserPrompt(_)) => panic!("unexpected prompt selected for '/init'"),
             None => panic!("expected a selected command for exact match"),
         }
@@ -308,11 +374,14 @@ mod tests {
 
     #[test]
     fn model_is_first_suggestion_for_mo() {
-        let mut popup = CommandPopup::new(Vec::new(), CommandPopupFlags::default());
+        let mut popup = CommandPopup::new(Vec::new(), Vec::new(), CommandPopupFlags::default());
         popup.on_composer_text_change("/mo".to_string());
         let matches = popup.filtered_items();
         match matches.first() {
             Some(CommandItem::Builtin(cmd)) => assert_eq!(cmd.command(), "model"),
+            Some(CommandItem::CustomCommand(_)) => {
+                panic!("unexpected custom command ranked before '/model' for '/mo'")
+            }
             Some(CommandItem::UserPrompt(_)) => {
                 panic!("unexpected prompt ranked before '/model' for '/mo'")
             }
@@ -322,7 +391,7 @@ mod tests {
 
     #[test]
     fn filtered_commands_keep_presentation_order_for_prefix() {
-        let mut popup = CommandPopup::new(Vec::new(), CommandPopupFlags::default());
+        let mut popup = CommandPopup::new(Vec::new(), Vec::new(), CommandPopupFlags::default());
         popup.on_composer_text_change("/m".to_string());
 
         let cmds: Vec<&str> = popup
@@ -330,6 +399,7 @@ mod tests {
             .into_iter()
             .filter_map(|item| match item {
                 CommandItem::Builtin(cmd) => Some(cmd.command()),
+                CommandItem::CustomCommand(_) => None,
                 CommandItem::UserPrompt(_) => None,
             })
             .collect();
@@ -354,12 +424,13 @@ mod tests {
                 argument_hint: None,
             },
         ];
-        let popup = CommandPopup::new(prompts, CommandPopupFlags::default());
+        let popup = CommandPopup::new(prompts, Vec::new(), CommandPopupFlags::default());
         let items = popup.filtered_items();
         let mut prompt_names: Vec<String> = items
             .into_iter()
             .filter_map(|it| match it {
                 CommandItem::UserPrompt(i) => popup.prompt(i).map(|p| p.name.clone()),
+                CommandItem::CustomCommand(_) => None,
                 _ => None,
             })
             .collect();
@@ -378,11 +449,13 @@ mod tests {
                 description: None,
                 argument_hint: None,
             }],
+            Vec::new(),
             CommandPopupFlags::default(),
         );
         let items = popup.filtered_items();
         let has_collision_prompt = items.into_iter().any(|it| match it {
             CommandItem::UserPrompt(i) => popup.prompt(i).is_some_and(|p| p.name == "init"),
+            CommandItem::CustomCommand(_) => false,
             _ => false,
         });
         assert!(
@@ -401,6 +474,7 @@ mod tests {
                 description: Some("Create feature branch, commit and open draft PR.".to_string()),
                 argument_hint: None,
             }],
+            Vec::new(),
             CommandPopupFlags::default(),
         );
         let rows = popup.rows_from_matches(vec![(CommandItem::UserPrompt(0), None)]);
@@ -421,6 +495,7 @@ mod tests {
                 description: None,
                 argument_hint: None,
             }],
+            Vec::new(),
             CommandPopupFlags::default(),
         );
         let rows = popup.rows_from_matches(vec![(CommandItem::UserPrompt(0), None)]);
@@ -429,8 +504,34 @@ mod tests {
     }
 
     #[test]
+    fn custom_command_description_includes_hint_and_scope() {
+        let popup = CommandPopup::new(
+            Vec::new(),
+            vec![CustomCommand {
+                name: "deploy".to_string(),
+                path: "/tmp/deploy.md".to_string().into(),
+                content: "body".to_string(),
+                description: Some("Deploy service".to_string()),
+                argument_hint: Some("[env]".to_string()),
+                allowed_tools: None,
+                model: None,
+                disable_model_invocation: None,
+                scope: CustomCommandScope::Project,
+                scope_subdir: Some("frontend".to_string()),
+            }],
+            CommandPopupFlags::default(),
+        );
+        let rows = popup.rows_from_matches(vec![(CommandItem::CustomCommand(0), None)]);
+        let description = rows.first().and_then(|row| row.description.as_deref());
+        assert_eq!(
+            description,
+            Some("Deploy service · [env] · project:frontend")
+        );
+    }
+
+    #[test]
     fn prefix_filter_limits_matches_for_ac() {
-        let mut popup = CommandPopup::new(Vec::new(), CommandPopupFlags::default());
+        let mut popup = CommandPopup::new(Vec::new(), Vec::new(), CommandPopupFlags::default());
         popup.on_composer_text_change("/ac".to_string());
 
         let cmds: Vec<&str> = popup
@@ -438,6 +539,7 @@ mod tests {
             .into_iter()
             .filter_map(|item| match item {
                 CommandItem::Builtin(cmd) => Some(cmd.command()),
+                CommandItem::CustomCommand(_) => None,
                 CommandItem::UserPrompt(_) => None,
             })
             .collect();
@@ -449,7 +551,7 @@ mod tests {
 
     #[test]
     fn quit_hidden_in_empty_filter_but_shown_for_prefix() {
-        let mut popup = CommandPopup::new(Vec::new(), CommandPopupFlags::default());
+        let mut popup = CommandPopup::new(Vec::new(), Vec::new(), CommandPopupFlags::default());
         popup.on_composer_text_change("/".to_string());
         let items = popup.filtered_items();
         assert!(!items.contains(&CommandItem::Builtin(SlashCommand::Quit)));
@@ -461,7 +563,7 @@ mod tests {
 
     #[test]
     fn collab_command_hidden_when_collaboration_modes_disabled() {
-        let mut popup = CommandPopup::new(Vec::new(), CommandPopupFlags::default());
+        let mut popup = CommandPopup::new(Vec::new(), Vec::new(), CommandPopupFlags::default());
         popup.on_composer_text_change("/".to_string());
 
         let cmds: Vec<&str> = popup
@@ -469,6 +571,7 @@ mod tests {
             .into_iter()
             .filter_map(|item| match item {
                 CommandItem::Builtin(cmd) => Some(cmd.command()),
+                CommandItem::CustomCommand(_) => None,
                 CommandItem::UserPrompt(_) => None,
             })
             .collect();
@@ -485,6 +588,7 @@ mod tests {
     #[test]
     fn collab_command_visible_when_collaboration_modes_enabled() {
         let mut popup = CommandPopup::new(
+            Vec::new(),
             Vec::new(),
             CommandPopupFlags {
                 collaboration_modes_enabled: true,
@@ -524,6 +628,7 @@ mod tests {
     fn personality_command_hidden_when_disabled() {
         let mut popup = CommandPopup::new(
             Vec::new(),
+            Vec::new(),
             CommandPopupFlags {
                 collaboration_modes_enabled: true,
                 connectors_enabled: false,
@@ -538,6 +643,7 @@ mod tests {
             .into_iter()
             .filter_map(|item| match item {
                 CommandItem::Builtin(cmd) => Some(cmd.command()),
+                CommandItem::CustomCommand(_) => None,
                 CommandItem::UserPrompt(_) => None,
             })
             .collect();
@@ -550,6 +656,7 @@ mod tests {
     #[test]
     fn personality_command_visible_when_enabled() {
         let mut popup = CommandPopup::new(
+            Vec::new(),
             Vec::new(),
             CommandPopupFlags {
                 collaboration_modes_enabled: true,

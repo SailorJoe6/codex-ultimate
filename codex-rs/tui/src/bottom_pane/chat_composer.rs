@@ -135,6 +135,7 @@ use super::skill_popup::MentionItem;
 use super::skill_popup::SkillPopup;
 use super::slash_commands;
 use crate::bottom_pane::paste_burst::FlushResult;
+use crate::bottom_pane::prompt_args::expand_custom_command;
 use crate::bottom_pane::prompt_args::expand_custom_prompt;
 use crate::bottom_pane::prompt_args::expand_if_numeric_with_positional_args;
 use crate::bottom_pane::prompt_args::parse_slash_name;
@@ -147,6 +148,7 @@ use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
 use crate::style::user_message_style;
 use codex_common::fuzzy_match::fuzzy_match;
+use codex_protocol::custom_commands::CustomCommand;
 use codex_protocol::custom_prompts::CustomPrompt;
 use codex_protocol::custom_prompts::PROMPTS_CMD_PREFIX;
 use codex_protocol::models::local_image_label_text;
@@ -186,14 +188,30 @@ pub enum InputResult {
     Submitted {
         text: String,
         text_elements: Vec<TextElement>,
+        command_overrides: Option<CustomCommandOverrides>,
     },
     Queued {
         text: String,
         text_elements: Vec<TextElement>,
+        command_overrides: Option<CustomCommandOverrides>,
     },
     Command(SlashCommand),
     CommandWithArgs(SlashCommand, String, Vec<TextElement>),
     None,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomCommandOverrides {
+    pub allowed_tools: Option<Vec<String>>,
+    pub model: Option<String>,
+    pub disable_model_invocation: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedSubmission {
+    text: String,
+    text_elements: Vec<TextElement>,
+    command_overrides: Option<CustomCommandOverrides>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -282,6 +300,7 @@ pub(crate) struct ChatComposer {
     // When true, disables paste-burst logic and inserts characters immediately.
     disable_paste_burst: bool,
     custom_prompts: Vec<CustomPrompt>,
+    custom_commands: Vec<CustomCommand>,
     footer_mode: FooterMode,
     footer_hint_override: Option<Vec<(String, String)>>,
     footer_flash: Option<FooterFlash>,
@@ -374,6 +393,7 @@ impl ChatComposer {
             paste_burst: PasteBurst::default(),
             disable_paste_burst: false,
             custom_prompts: Vec::new(),
+            custom_commands: Vec::new(),
             footer_mode: FooterMode::ComposerEmpty,
             footer_hint_override: None,
             footer_flash: None,
@@ -1078,6 +1098,27 @@ impl ChatComposer {
                                 cursor_target = Some(self.textarea.text().len());
                             }
                         }
+                        CommandItem::CustomCommand(idx) => {
+                            if let Some(command) = popup.custom_command(idx) {
+                                let current_text = self.textarea.text().to_string();
+                                let current_elements = self.textarea.text_elements();
+                                let (mut text, elements) =
+                                    Self::replace_slash_command_name_with_elements(
+                                        &current_text,
+                                        &current_elements,
+                                        &command.name,
+                                    )
+                                    .unwrap_or_else(|| (format!("/{}", command.name), Vec::new()));
+                                if let Some((_, rest, _)) = parse_slash_name(&text)
+                                    && rest.is_empty()
+                                    && !text.ends_with(' ')
+                                {
+                                    text.push(' ');
+                                }
+                                self.textarea.set_text_with_elements(&text, &elements);
+                                cursor_target = Some(text.len());
+                            }
+                        }
                         CommandItem::UserPrompt(idx) => {
                             if let Some(prompt) = popup.prompt(idx) {
                                 match prompt_selection_action(
@@ -1136,6 +1177,7 @@ impl ChatComposer {
                         InputResult::Submitted {
                             text: expanded.text,
                             text_elements: expanded.text_elements,
+                            command_overrides: None,
                         },
                         true,
                     );
@@ -1146,6 +1188,32 @@ impl ChatComposer {
                         CommandItem::Builtin(cmd) => {
                             self.textarea.set_text_clearing_elements("");
                             return (InputResult::Command(cmd), true);
+                        }
+                        CommandItem::CustomCommand(idx) => {
+                            if let Some(command) = popup.custom_command(idx) {
+                                let current_text = self.textarea.text().to_string();
+                                let current_elements = self.textarea.text_elements();
+                                let (text, elements) =
+                                    Self::replace_slash_command_name_with_elements(
+                                        &current_text,
+                                        &current_elements,
+                                        &command.name,
+                                    )
+                                    .unwrap_or_else(|| (format!("/{}", command.name), Vec::new()));
+                                self.textarea.set_text_with_elements(&text, &elements);
+                                if let Some(prepared) = self.prepare_submission_text(true) {
+                                    self.textarea.set_text_clearing_elements("");
+                                    return (
+                                        InputResult::Submitted {
+                                            text: prepared.text,
+                                            text_elements: prepared.text_elements,
+                                            command_overrides: prepared.command_overrides,
+                                        },
+                                        true,
+                                    );
+                                }
+                            }
+                            return (InputResult::None, true);
                         }
                         CommandItem::UserPrompt(idx) => {
                             if let Some(prompt) = popup.prompt(idx) {
@@ -1168,6 +1236,7 @@ impl ChatComposer {
                                             InputResult::Submitted {
                                                 text,
                                                 text_elements,
+                                                command_overrides: None,
                                             },
                                             true,
                                         );
@@ -1852,7 +1921,7 @@ impl ChatComposer {
     fn prepare_submission_text(
         &mut self,
         record_history: bool,
-    ) -> Option<(String, Vec<TextElement>)> {
+    ) -> Option<PreparedSubmission> {
         let mut text = self.textarea.text().to_string();
         let original_input = text.clone();
         let original_text_elements = self.textarea.text_elements();
@@ -1902,7 +1971,11 @@ impl ChatComposer {
                             .any(|prompt| prompt.name == prompt_name)
                     })
                     .unwrap_or(false);
-                if !is_builtin && !is_known_prompt {
+                let is_known_custom_command = self
+                    .custom_commands
+                    .iter()
+                    .any(|command| command.name == name);
+                if !is_builtin && !is_known_prompt && !is_known_custom_command {
                     let message = format!(
                         r#"Unrecognized command '/{name}'. Type "/" for a list of supported commands."#
                     );
@@ -1921,7 +1994,19 @@ impl ChatComposer {
             }
         }
 
+        let mut command_overrides = None;
         if self.slash_commands_enabled() {
+            if let Some(expanded) =
+                expand_custom_command(&text, &text_elements, &self.custom_commands)
+            {
+                command_overrides = Some(CustomCommandOverrides {
+                    allowed_tools: expanded.command.allowed_tools.clone(),
+                    model: expanded.command.model.clone(),
+                    disable_model_invocation: expanded.command.disable_model_invocation,
+                });
+                text = expanded.expansion.text;
+                text_elements = expanded.expansion.text_elements;
+            }
             let expanded_prompt =
                 match expand_custom_prompt(&text, &text_elements, &self.custom_prompts) {
                     Ok(expanded) => expanded,
@@ -1963,7 +2048,11 @@ impl ChatComposer {
             });
         }
         self.pending_pastes.clear();
-        Some((text, text_elements))
+        Some(PreparedSubmission {
+            text,
+            text_elements,
+            command_overrides,
+        })
     }
 
     /// Common logic for handling message submission/queuing.
@@ -2032,12 +2121,13 @@ impl ChatComposer {
             return (result, true);
         }
 
-        if let Some((text, text_elements)) = self.prepare_submission_text(true) {
+        if let Some(prepared) = self.prepare_submission_text(true) {
             if should_queue {
                 (
                     InputResult::Queued {
-                        text,
-                        text_elements,
+                        text: prepared.text,
+                        text_elements: prepared.text_elements,
+                        command_overrides: prepared.command_overrides,
                     },
                     true,
                 )
@@ -2045,8 +2135,9 @@ impl ChatComposer {
                 // Do not clear attached_images here; ChatWidget drains them via take_recent_submission_images().
                 (
                     InputResult::Submitted {
-                        text,
-                        text_elements,
+                        text: prepared.text,
+                        text_elements: prepared.text_elements,
+                        command_overrides: prepared.command_overrides,
                     },
                     true,
                 )
@@ -2142,12 +2233,12 @@ impl ChatComposer {
         &mut self,
         record_history: bool,
     ) -> Option<(String, Vec<TextElement>)> {
-        let (prepared_text, prepared_elements) = self.prepare_submission_text(record_history)?;
-        let (_, prepared_rest, prepared_rest_offset) = parse_slash_name(&prepared_text)?;
+        let prepared = self.prepare_submission_text(record_history)?;
+        let (_, prepared_rest, prepared_rest_offset) = parse_slash_name(&prepared.text)?;
         let mut args_elements = Self::slash_command_args_elements(
             prepared_rest,
             prepared_rest_offset,
-            &prepared_elements,
+            &prepared.text_elements,
         );
         let trimmed_rest = prepared_rest.trim();
         args_elements = Self::trim_text_elements(prepared_rest, trimmed_rest, args_elements);
@@ -2774,9 +2865,18 @@ impl ChatComposer {
             return true;
         }
 
-        self.custom_prompts.iter().any(|prompt| {
-            fuzzy_match(&format!("{PROMPTS_CMD_PREFIX}:{}", prompt.name), name).is_some()
-        })
+        if self
+            .custom_commands
+            .iter()
+            .any(|command| fuzzy_match(&command.name, name).is_some())
+        {
+            return true;
+        }
+
+        let prompt_prefix = format!("{PROMPTS_CMD_PREFIX}:");
+        self.custom_prompts
+            .iter()
+            .any(|p| fuzzy_match(&format!("{prompt_prefix}{}", p.name), name).is_some())
     }
 
     /// Synchronize `self.command_popup` with the current text in the
@@ -2824,6 +2924,7 @@ impl ChatComposer {
                     let personality_command_enabled = self.personality_command_enabled;
                     let mut command_popup = CommandPopup::new(
                         self.custom_prompts.clone(),
+                        self.custom_commands.clone(),
                         CommandPopupFlags {
                             collaboration_modes_enabled,
                             connectors_enabled,
@@ -2842,6 +2943,64 @@ impl ChatComposer {
         if let ActivePopup::Command(popup) = &mut self.active_popup {
             popup.set_prompts(prompts);
         }
+    }
+
+    pub(crate) fn set_custom_commands(&mut self, commands: Vec<CustomCommand>) {
+        self.custom_commands = commands.clone();
+        if let ActivePopup::Command(popup) = &mut self.active_popup {
+            popup.set_custom_commands(commands);
+        }
+    }
+
+    fn replace_slash_command_name_with_elements(
+        text: &str,
+        text_elements: &[TextElement],
+        new_name: &str,
+    ) -> Option<(String, Vec<TextElement>)> {
+        let trimmed = text.trim_start();
+        let trim_offset = text.len().saturating_sub(trimmed.len());
+        let stripped = trimmed.strip_prefix('/')?;
+        let mut name_end = stripped.len();
+        for (idx, ch) in stripped.char_indices() {
+            if ch.is_whitespace() {
+                name_end = idx;
+                break;
+            }
+        }
+        let name_start = trim_offset + 1;
+        let name_end_abs = name_start + name_end;
+        if name_end_abs > text.len() {
+            return None;
+        }
+        let mut out = String::with_capacity(
+            text.len()
+                .saturating_sub(name_end)
+                .saturating_add(new_name.len()),
+        );
+        out.push_str(&text[..name_start]);
+        out.push_str(new_name);
+        out.push_str(&text[name_end_abs..]);
+        let delta = new_name.len() as i64 - name_end as i64;
+        if delta == 0 {
+            return Some((out, text_elements.to_vec()));
+        }
+        let mut out_elements = Vec::new();
+        for elem in text_elements {
+            if elem.byte_range.end <= name_start {
+                out_elements.push(elem.clone());
+                continue;
+            }
+            if elem.byte_range.start >= name_end_abs {
+                let start = (elem.byte_range.start as i64 + delta) as usize;
+                let end = (elem.byte_range.end as i64 + delta) as usize;
+                if start < end {
+                    out_elements.push(elem.map_range(|_| ByteRange { start, end }));
+                }
+                continue;
+            }
+            out_elements.push(elem.clone());
+        }
+        Some((out, out_elements))
     }
 
     /// Synchronize `self.file_search_popup` with the current text in the textarea.
@@ -4767,6 +4926,9 @@ mod tests {
                 Some(CommandItem::Builtin(cmd)) => {
                     assert_eq!(cmd.command(), "model")
                 }
+                Some(CommandItem::CustomCommand(_)) => {
+                    panic!("unexpected custom command selected for '/mo'")
+                }
                 Some(CommandItem::UserPrompt(_)) => {
                     panic!("unexpected prompt selected for '/mo'")
                 }
@@ -4823,6 +4985,9 @@ mod tests {
             ActivePopup::Command(popup) => match popup.selected_item() {
                 Some(CommandItem::Builtin(cmd)) => {
                     assert_eq!(cmd.command(), "resume")
+                }
+                Some(CommandItem::CustomCommand(_)) => {
+                    panic!("unexpected custom command selected for '/res'")
                 }
                 Some(CommandItem::UserPrompt(_)) => {
                     panic!("unexpected prompt selected for '/res'")
@@ -5495,6 +5660,7 @@ mod tests {
             InputResult::Submitted {
                 text,
                 text_elements,
+                ..
             } => {
                 assert_eq!(text, "[Image #1] hi");
                 assert_eq!(text_elements.len(), 1);
@@ -5591,6 +5757,7 @@ mod tests {
             InputResult::Submitted {
                 text,
                 text_elements,
+                ..
             } => {
                 let expected = format!("{large_content} [Image #1]");
                 assert_eq!(text, expected);
@@ -5635,6 +5802,7 @@ mod tests {
             InputResult::Submitted {
                 text,
                 text_elements,
+                ..
             } => {
                 let trimmed = large_content.trim().to_string();
                 assert_eq!(text, format!("{trimmed} [Image #1]"));
@@ -5679,6 +5847,7 @@ mod tests {
             InputResult::Submitted {
                 text,
                 text_elements,
+                ..
             } => {
                 assert_eq!(text, "line1\nline2\n [Image #1]");
                 assert!(!text.contains('\r'));
@@ -5736,6 +5905,7 @@ mod tests {
             InputResult::Submitted {
                 text,
                 text_elements,
+                ..
             } => {
                 assert_eq!(text, format!("/unknown {large_content}"));
                 assert!(text_elements.is_empty());
@@ -5765,6 +5935,7 @@ mod tests {
             InputResult::Submitted {
                 text,
                 text_elements,
+                ..
             } => {
                 assert_eq!(text, "[Image #1]");
                 assert_eq!(text_elements.len(), 1);
@@ -6207,6 +6378,7 @@ mod tests {
             InputResult::Submitted {
                 text,
                 text_elements,
+                ..
             } => {
                 let placeholder = local_image_label_text(1);
                 assert_eq!(text, format!("Review {placeholder}"));
@@ -6264,6 +6436,7 @@ mod tests {
             InputResult::Submitted {
                 text,
                 text_elements,
+                ..
             } => {
                 let placeholder = local_image_label_text(1);
                 assert_eq!(text, format!("Review {placeholder}"));
@@ -6320,6 +6493,7 @@ mod tests {
             InputResult::Submitted {
                 text,
                 text_elements,
+                ..
             } => {
                 assert_eq!(text, "Review changes");
                 assert!(text_elements.is_empty());
@@ -6437,6 +6611,7 @@ mod tests {
             InputResult::Submitted {
                 text,
                 text_elements,
+                ..
             } => {
                 let placeholder = local_image_label_text(1);
                 assert_eq!(text, format!("Review {placeholder}\n\n{large_content}"));

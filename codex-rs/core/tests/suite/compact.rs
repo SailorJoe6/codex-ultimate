@@ -1525,6 +1525,8 @@ async fn auto_compact_runs_after_resume_when_token_usage_is_over_limit() {
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await
         .unwrap();

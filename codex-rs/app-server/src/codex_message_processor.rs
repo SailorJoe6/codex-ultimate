@@ -4299,6 +4299,8 @@ impl CodexMessageProcessor {
                 final_output_json_schema: output_schema,
                 collaboration_mode: None,
                 personality: None,
+                allowed_tools: None,
+                disable_model_invocation: None,
             })
             .await;
 

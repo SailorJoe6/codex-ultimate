@@ -536,6 +536,7 @@ pub(crate) struct TurnContext {
     pub(crate) truncation_policy: TruncationPolicy,
     pub(crate) dynamic_tools: Vec<DynamicToolSpec>,
     turn_metadata_header: OnceCell<Option<String>>,
+    pub(crate) disable_model_invocation: bool,
 }
 impl TurnContext {
     pub(crate) fn model_context_window(&self) -> Option<i64> {
@@ -694,6 +695,14 @@ pub(crate) struct SessionSettingsUpdate {
     pub(crate) reasoning_summary: Option<ReasoningSummaryConfig>,
     pub(crate) final_output_json_schema: Option<Option<Value>>,
     pub(crate) personality: Option<Personality>,
+    pub(crate) allowed_tools: Option<Vec<String>>,
+    pub(crate) disable_model_invocation: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TurnOverrides {
+    pub(crate) allowed_tools: Option<HashSet<String>>,
+    pub(crate) disable_model_invocation: bool,
 }
 
 impl Session {
@@ -778,6 +787,8 @@ impl Session {
         per_turn_config: Config,
         model_info: ModelInfo,
         sub_id: String,
+        transport_manager: TransportManager,
+        turn_overrides: TurnOverrides,
     ) -> TurnContext {
         let reasoning_effort = session_configuration.collaboration_mode.reasoning_effort();
         let reasoning_summary = session_configuration.model_reasoning_summary;
@@ -791,11 +802,12 @@ impl Session {
         let otel_manager_for_context = otel_manager;
         let per_turn_config = Arc::new(per_turn_config);
 
-        let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        let mut tools_config = ToolsConfig::new(&ToolsConfigParams {
             model_info: &model_info,
             features: &per_turn_config.features,
             web_search_mode: per_turn_config.web_search_mode,
         });
+        tools_config.allowed_tools = turn_overrides.allowed_tools.clone();
 
         let cwd = session_configuration.cwd.clone();
         TurnContext {
@@ -827,6 +839,7 @@ impl Session {
             truncation_policy: model_info.truncation_policy.into(),
             dynamic_tools: session_configuration.dynamic_tools.clone(),
             turn_metadata_header: OnceCell::new(),
+            disable_model_invocation: turn_overrides.disable_model_invocation,
         }
     }
 
@@ -1387,12 +1400,20 @@ impl Session {
             }
         };
 
+        let turn_overrides = TurnOverrides {
+            allowed_tools: updates
+                .allowed_tools
+                .map(|tools| tools.into_iter().collect()),
+            disable_model_invocation: updates.disable_model_invocation.unwrap_or(false),
+        };
+
         Ok(self
             .new_turn_from_configuration(
                 sub_id,
                 session_configuration,
                 updates.final_output_json_schema,
                 sandbox_policy_changed,
+                turn_overrides,
             )
             .await)
     }
@@ -1403,6 +1424,7 @@ impl Session {
         session_configuration: SessionConfiguration,
         final_output_json_schema: Option<Option<Value>>,
         sandbox_policy_changed: bool,
+        turn_overrides: TurnOverrides,
     ) -> Arc<TurnContext> {
         let per_turn_config = Self::build_per_turn_config(&session_configuration);
 
@@ -1443,6 +1465,8 @@ impl Session {
             per_turn_config,
             model_info,
             sub_id,
+            self.services.transport_manager.clone(),
+            turn_overrides,
         );
 
         if let Some(final_schema) = final_output_json_schema {
@@ -1471,8 +1495,14 @@ impl Session {
             let state = self.state.lock().await;
             state.session_configuration.clone()
         };
-        self.new_turn_from_configuration(sub_id, session_configuration, None, false)
-            .await
+        self.new_turn_from_configuration(
+            sub_id,
+            session_configuration,
+            None,
+            false,
+            TurnOverrides::default(),
+        )
+        .await
     }
 
     pub(crate) async fn current_collaboration_mode(&self) -> CollaborationMode {
@@ -2733,6 +2763,9 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
             Op::ListCustomPrompts => {
                 handlers::list_custom_prompts(&sess, sub.id.clone()).await;
             }
+            Op::ListCustomCommands => {
+                handlers::list_custom_commands(&sess, sub.id.clone()).await;
+            }
             Op::ListSkills { cwds, force_reload } => {
                 handlers::list_skills(&sess, sub.id.clone(), cwds, force_reload).await;
             }
@@ -2820,6 +2853,7 @@ mod handlers {
     use codex_protocol::protocol::ErrorEvent;
     use codex_protocol::protocol::Event;
     use codex_protocol::protocol::EventMsg;
+    use codex_protocol::protocol::ListCustomCommandsResponseEvent;
     use codex_protocol::protocol::ListCustomPromptsResponseEvent;
     use codex_protocol::protocol::ListRemoteSkillsResponseEvent;
     use codex_protocol::protocol::ListSkillsResponseEvent;
@@ -2889,6 +2923,8 @@ mod handlers {
                 items,
                 collaboration_mode,
                 personality,
+                allowed_tools,
+                disable_model_invocation,
             } => {
                 let collaboration_mode = collaboration_mode.or_else(|| {
                     Some(CollaborationMode {
@@ -2911,6 +2947,8 @@ mod handlers {
                         reasoning_summary: Some(summary),
                         final_output_json_schema: Some(final_output_json_schema),
                         personality,
+                        allowed_tools,
+                        disable_model_invocation,
                     },
                 )
             }
@@ -3164,6 +3202,25 @@ mod handlers {
             id: sub_id,
             msg: EventMsg::ListCustomPromptsResponse(ListCustomPromptsResponseEvent {
                 custom_prompts,
+            }),
+        };
+        sess.send_event_raw(event).await;
+    }
+
+    pub async fn list_custom_commands(sess: &Session, sub_id: String) {
+        let (cwd, config) = {
+            let state = sess.state.lock().await;
+            (
+                state.session_configuration.cwd.clone(),
+                Arc::clone(&state.session_configuration.original_config_do_not_use),
+            )
+        };
+        let outcome = crate::custom_commands::discover_custom_commands(&cwd, &config).await;
+        let event = Event {
+            id: sub_id,
+            msg: EventMsg::ListCustomCommandsResponse(ListCustomCommandsResponseEvent {
+                custom_commands: outcome.commands,
+                errors: outcome.errors,
             }),
         };
         sess.send_event_raw(event).await;
@@ -3565,6 +3622,7 @@ async fn spawn_review_thread(
         dynamic_tools: parent_turn_context.dynamic_tools.clone(),
         truncation_policy: model_info.truncation_policy.into(),
         turn_metadata_header: parent_turn_context.turn_metadata_header.clone(),
+        disable_model_invocation: false,
     };
 
     // Seed the child task with the review prompt as the initial user message.
@@ -3756,6 +3814,17 @@ pub(crate) async fn run_turn(
     let response_item: ResponseItem = initial_input_for_turn.clone().into();
     sess.record_user_prompt_and_emit_turn_item(turn_context.as_ref(), &input, response_item)
         .await;
+
+    if turn_context.disable_model_invocation {
+        sess.send_event(
+            &turn_context,
+            EventMsg::Warning(WarningEvent {
+                message: "Model invocation disabled for this turn.".to_string(),
+            }),
+        )
+        .await;
+        return None;
+    }
 
     if !skill_items.is_empty() {
         sess.record_conversation_items(&turn_context, &skill_items)
@@ -5881,6 +5950,8 @@ mod tests {
             per_turn_config,
             model_info,
             "turn_id".to_string(),
+            services.transport_manager.clone(),
+            TurnOverrides::default(),
         );
 
         let session = Session {
@@ -6011,6 +6082,8 @@ mod tests {
             per_turn_config,
             model_info,
             "turn_id".to_string(),
+            services.transport_manager.clone(),
+            TurnOverrides::default(),
         ));
 
         let session = Arc::new(Session {

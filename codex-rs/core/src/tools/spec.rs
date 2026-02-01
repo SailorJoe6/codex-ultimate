@@ -23,6 +23,7 @@ use serde_json::Value as JsonValue;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ToolsConfig {
@@ -34,6 +35,7 @@ pub(crate) struct ToolsConfig {
     pub memory_tools: bool,
     pub request_rule_enabled: bool,
     pub experimental_supported_tools: Vec<String>,
+    pub allowed_tools: Option<HashSet<String>>,
 }
 
 pub(crate) struct ToolsConfigParams<'a> {
@@ -89,6 +91,7 @@ impl ToolsConfig {
             memory_tools: include_memory_tools,
             request_rule_enabled,
             experimental_supported_tools: model_info.experimental_supported_tools.clone(),
+            allowed_tools: None,
         }
     }
 }
@@ -1270,6 +1273,13 @@ pub(crate) fn build_specs(
 
     let mut builder = ToolRegistryBuilder::new();
 
+    fn tool_allowed(config: &ToolsConfig, tool_name: &str) -> bool {
+        match config.allowed_tools.as_ref() {
+            Some(allowed) => allowed.contains(tool_name),
+            None => true,
+        }
+    }
+
     let shell_handler = Arc::new(ShellHandler);
     let unified_exec_handler = Arc::new(UnifiedExecHandler);
     let plan_handler = Arc::new(PlanHandler);
@@ -1284,53 +1294,79 @@ pub(crate) fn build_specs(
 
     match &config.shell_type {
         ConfigShellToolType::Default => {
-            builder.push_spec_with_parallel_support(
-                create_shell_tool(config.request_rule_enabled),
-                true,
-            );
+            if tool_allowed(config, "shell") {
+                builder.push_spec_with_parallel_support(
+                    create_shell_tool(config.request_rule_enabled),
+                    true,
+                );
+            }
         }
         ConfigShellToolType::Local => {
-            builder.push_spec_with_parallel_support(ToolSpec::LocalShell {}, true);
+            if tool_allowed(config, "local_shell") {
+                builder.push_spec_with_parallel_support(ToolSpec::LocalShell {}, true);
+            }
         }
         ConfigShellToolType::UnifiedExec => {
-            builder.push_spec_with_parallel_support(
-                create_exec_command_tool(config.request_rule_enabled),
-                true,
-            );
-            builder.push_spec(create_write_stdin_tool());
-            builder.register_handler("exec_command", unified_exec_handler.clone());
-            builder.register_handler("write_stdin", unified_exec_handler);
+            if tool_allowed(config, "exec_command") {
+                builder.push_spec_with_parallel_support(
+                    create_exec_command_tool(config.request_rule_enabled),
+                    true,
+                );
+                builder.register_handler("exec_command", unified_exec_handler.clone());
+            }
+            if tool_allowed(config, "write_stdin") {
+                builder.push_spec(create_write_stdin_tool());
+                builder.register_handler("write_stdin", unified_exec_handler);
+            }
         }
         ConfigShellToolType::Disabled => {
             // Do nothing.
         }
         ConfigShellToolType::ShellCommand => {
-            builder.push_spec_with_parallel_support(
-                create_shell_command_tool(config.request_rule_enabled),
-                true,
-            );
+            if tool_allowed(config, "shell_command") {
+                builder.push_spec_with_parallel_support(
+                    create_shell_command_tool(config.request_rule_enabled),
+                    true,
+                );
+            }
         }
     }
 
     if config.shell_type != ConfigShellToolType::Disabled {
         // Always register shell aliases so older prompts remain compatible.
-        builder.register_handler("shell", shell_handler.clone());
-        builder.register_handler("container.exec", shell_handler.clone());
-        builder.register_handler("local_shell", shell_handler);
-        builder.register_handler("shell_command", shell_command_handler);
+        if tool_allowed(config, "shell") {
+            builder.register_handler("shell", shell_handler.clone());
+        }
+        if tool_allowed(config, "container.exec") {
+            builder.register_handler("container.exec", shell_handler.clone());
+        }
+        if tool_allowed(config, "local_shell") {
+            builder.register_handler("local_shell", shell_handler);
+        }
+        if tool_allowed(config, "shell_command") {
+            builder.register_handler("shell_command", shell_command_handler);
+        }
     }
 
-    builder.push_spec_with_parallel_support(create_list_mcp_resources_tool(), true);
-    builder.push_spec_with_parallel_support(create_list_mcp_resource_templates_tool(), true);
-    builder.push_spec_with_parallel_support(create_read_mcp_resource_tool(), true);
-    builder.register_handler("list_mcp_resources", mcp_resource_handler.clone());
-    builder.register_handler("list_mcp_resource_templates", mcp_resource_handler.clone());
-    builder.register_handler("read_mcp_resource", mcp_resource_handler);
+    if tool_allowed(config, "list_mcp_resources") {
+        builder.push_spec_with_parallel_support(create_list_mcp_resources_tool(), true);
+        builder.register_handler("list_mcp_resources", mcp_resource_handler.clone());
+    }
+    if tool_allowed(config, "list_mcp_resource_templates") {
+        builder.push_spec_with_parallel_support(create_list_mcp_resource_templates_tool(), true);
+        builder.register_handler("list_mcp_resource_templates", mcp_resource_handler.clone());
+    }
+    if tool_allowed(config, "read_mcp_resource") {
+        builder.push_spec_with_parallel_support(create_read_mcp_resource_tool(), true);
+        builder.register_handler("read_mcp_resource", mcp_resource_handler);
+    }
 
-    builder.push_spec(PLAN_TOOL.clone());
-    builder.register_handler("update_plan", plan_handler);
+    if tool_allowed(config, "update_plan") {
+        builder.push_spec(PLAN_TOOL.clone());
+        builder.register_handler("update_plan", plan_handler);
+    }
 
-    if config.collaboration_modes_tools {
+    if config.collaboration_modes_tools && tool_allowed(config, "request_user_input") {
         builder.push_spec(create_request_user_input_tool());
         builder.register_handler("request_user_input", request_user_input_handler);
     }
@@ -1341,20 +1377,23 @@ pub(crate) fn build_specs(
     }
 
     if let Some(apply_patch_tool_type) = &config.apply_patch_tool_type {
-        match apply_patch_tool_type {
-            ApplyPatchToolType::Freeform => {
-                builder.push_spec(create_apply_patch_freeform_tool());
+        if tool_allowed(config, "apply_patch") {
+            match apply_patch_tool_type {
+                ApplyPatchToolType::Freeform => {
+                    builder.push_spec(create_apply_patch_freeform_tool());
+                }
+                ApplyPatchToolType::Function => {
+                    builder.push_spec(create_apply_patch_json_tool());
+                }
             }
-            ApplyPatchToolType::Function => {
-                builder.push_spec(create_apply_patch_json_tool());
-            }
+            builder.register_handler("apply_patch", apply_patch_handler);
         }
-        builder.register_handler("apply_patch", apply_patch_handler);
     }
 
     if config
         .experimental_supported_tools
         .contains(&"grep_files".to_string())
+        && tool_allowed(config, "grep_files")
     {
         let grep_files_handler = Arc::new(GrepFilesHandler);
         builder.push_spec_with_parallel_support(create_grep_files_tool(), true);
@@ -1364,6 +1403,7 @@ pub(crate) fn build_specs(
     if config
         .experimental_supported_tools
         .contains(&"read_file".to_string())
+        && tool_allowed(config, "read_file")
     {
         let read_file_handler = Arc::new(ReadFileHandler);
         builder.push_spec_with_parallel_support(create_read_file_tool(), true);
@@ -1374,6 +1414,7 @@ pub(crate) fn build_specs(
         .experimental_supported_tools
         .iter()
         .any(|tool| tool == "list_dir")
+        && tool_allowed(config, "list_dir")
     {
         let list_dir_handler = Arc::new(ListDirHandler);
         builder.push_spec_with_parallel_support(create_list_dir_tool(), true);
@@ -1383,6 +1424,7 @@ pub(crate) fn build_specs(
     if config
         .experimental_supported_tools
         .contains(&"test_sync_tool".to_string())
+        && tool_allowed(config, "test_sync_tool")
     {
         let test_sync_handler = Arc::new(TestSyncHandler);
         builder.push_spec_with_parallel_support(create_test_sync_tool(), true);
@@ -1391,35 +1433,52 @@ pub(crate) fn build_specs(
 
     match config.web_search_mode {
         Some(WebSearchMode::Cached) => {
-            builder.push_spec(ToolSpec::WebSearch {
-                external_web_access: Some(false),
-            });
+            if tool_allowed(config, "web_search") {
+                builder.push_spec(ToolSpec::WebSearch {
+                    external_web_access: Some(false),
+                });
+            }
         }
         Some(WebSearchMode::Live) => {
-            builder.push_spec(ToolSpec::WebSearch {
-                external_web_access: Some(true),
-            });
+            if tool_allowed(config, "web_search") {
+                builder.push_spec(ToolSpec::WebSearch {
+                    external_web_access: Some(true),
+                });
+            }
         }
         Some(WebSearchMode::Disabled) | None => {}
     }
 
-    builder.push_spec_with_parallel_support(create_view_image_tool(), true);
-    builder.register_handler("view_image", view_image_handler);
+    if tool_allowed(config, "view_image") {
+        builder.push_spec_with_parallel_support(create_view_image_tool(), true);
+        builder.register_handler("view_image", view_image_handler);
+    }
 
     if config.collab_tools {
         let collab_handler = Arc::new(CollabHandler);
-        builder.push_spec(create_spawn_agent_tool());
-        builder.push_spec(create_send_input_tool());
-        builder.push_spec(create_wait_tool());
-        builder.push_spec(create_close_agent_tool());
-        builder.register_handler("spawn_agent", collab_handler.clone());
-        builder.register_handler("send_input", collab_handler.clone());
-        builder.register_handler("wait", collab_handler.clone());
-        builder.register_handler("close_agent", collab_handler);
+        if tool_allowed(config, "spawn_agent") {
+            builder.push_spec(create_spawn_agent_tool());
+            builder.register_handler("spawn_agent", collab_handler.clone());
+        }
+        if tool_allowed(config, "send_input") {
+            builder.push_spec(create_send_input_tool());
+            builder.register_handler("send_input", collab_handler.clone());
+        }
+        if tool_allowed(config, "wait") {
+            builder.push_spec(create_wait_tool());
+            builder.register_handler("wait", collab_handler.clone());
+        }
+        if tool_allowed(config, "close_agent") {
+            builder.push_spec(create_close_agent_tool());
+            builder.register_handler("close_agent", collab_handler);
+        }
     }
 
     if let Some(mcp_tools) = mcp_tools {
-        let mut entries: Vec<(String, rmcp::model::Tool)> = mcp_tools.into_iter().collect();
+        let mut entries: Vec<(String, rmcp::model::Tool)> = mcp_tools
+            .into_iter()
+            .filter(|(name, _)| tool_allowed(config, name))
+            .collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
 
         for (name, tool) in entries.into_iter() {
@@ -1437,6 +1496,9 @@ pub(crate) fn build_specs(
 
     if !dynamic_tools.is_empty() {
         for tool in dynamic_tools {
+            if !tool_allowed(config, tool.name.as_str()) {
+                continue;
+            }
             match dynamic_tool_to_openai_tool(tool) {
                 Ok(converted_tool) => {
                     builder.push_spec(ToolSpec::Function(converted_tool));
@@ -1462,6 +1524,7 @@ mod tests {
     use crate::models_manager::manager::ModelsManager;
     use crate::tools::registry::ConfiguredToolSpec;
     use pretty_assertions::assert_eq;
+    use std::collections::HashSet;
 
     use super::*;
 
@@ -1534,6 +1597,29 @@ mod tests {
                 "expected tool {expected} to be present; had: {names:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_build_specs_respects_allowed_tools() {
+        let config = test_config();
+        let model_info = ModelsManager::construct_model_info_offline("gpt-5-codex", &config);
+        let features = Features::with_defaults();
+        let mut tools_config = ToolsConfig::new(&ToolsConfigParams {
+            model_info: &model_info,
+            features: &features,
+            web_search_mode: None,
+        });
+        tools_config.allowed_tools = Some(HashSet::from([
+            "update_plan".to_string(),
+            "view_image".to_string(),
+        ]));
+
+        let (tools, _) = build_specs(&tools_config, None, &[]).build();
+
+        assert_contains_tool_names(&tools, &["update_plan", "view_image"]);
+        let names: HashSet<&str> = tools.iter().map(|t| tool_name(&t.spec)).collect();
+        assert!(!names.contains("shell"));
+        assert!(!names.contains("read_file"));
     }
 
     fn shell_tool_name(config: &ToolsConfig) -> Option<&'static str> {

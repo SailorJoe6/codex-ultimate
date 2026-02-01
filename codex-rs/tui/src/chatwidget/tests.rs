@@ -469,6 +469,8 @@ async fn interrupted_turn_restores_queued_messages_with_images_and_elements() {
         }],
         text_elements: first_elements,
         mention_paths: HashMap::new(),
+        command_overrides: None,
+        command_overrides: None,
     });
     chat.queued_user_messages.push_back(UserMessage {
         text: second_text,
@@ -478,6 +480,8 @@ async fn interrupted_turn_restores_queued_messages_with_images_and_elements() {
         }],
         text_elements: second_elements,
         mention_paths: HashMap::new(),
+        command_overrides: None,
+        command_overrides: None,
     });
     chat.refresh_queued_user_messages();
 
@@ -606,6 +610,8 @@ async fn remap_placeholders_uses_attachment_labels() {
         text_elements: elements,
         local_images: attachments,
         mention_paths: HashMap::new(),
+        command_overrides: None,
+        command_overrides: None,
     };
     let mut next_label = 3usize;
     let remapped = remap_placeholders_for_message(message, &mut next_label);
@@ -667,6 +673,8 @@ async fn remap_placeholders_uses_byte_ranges_when_placeholder_missing() {
         text_elements: elements,
         local_images: attachments,
         mention_paths: HashMap::new(),
+        command_overrides: None,
+        command_overrides: None,
     };
     let mut next_label = 3usize;
     let remapped = remap_placeholders_for_message(message, &mut next_label);
@@ -1399,6 +1407,8 @@ async fn submit_user_message_with_mode_sets_coding_collaboration_mode() {
                     ..
                 }),
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
             ..
         } => {}
         other => {
@@ -2721,6 +2731,8 @@ async fn collab_slash_command_opens_picker_and_updates_mode() {
                     ..
                 }),
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
             ..
         } => {}
         other => {
@@ -2739,6 +2751,8 @@ async fn collab_slash_command_opens_picker_and_updates_mode() {
                     ..
                 }),
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
             ..
         } => {}
         other => {
@@ -2937,6 +2951,8 @@ async fn collab_mode_is_sent_after_enabling() {
                     ..
                 }),
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
             ..
         } => {}
         other => {
@@ -3000,6 +3016,8 @@ async fn user_turn_includes_personality_from_config() {
     match next_submit_op(&mut op_rx) {
         Op::UserTurn {
             personality: Some(Personality::Friendly),
+            allowed_tools: None,
+            disable_model_invocation: None,
             ..
         } => {}
         other => panic!("expected Op::UserTurn with friendly personality, got {other:?}"),

@@ -30,6 +30,9 @@ use codex_core::config::load_config_as_toml_with_cli_overrides;
 use codex_core::config::resolve_oss_provider;
 use codex_core::config_loader::ConfigLoadError;
 use codex_core::config_loader::format_config_error_with_source;
+use codex_core::custom_command_expansion::expand_custom_command;
+use codex_core::custom_prompt_expansion::PromptExpansionError;
+use codex_core::custom_prompt_expansion::expand_custom_prompt_text;
 use codex_core::git_info::get_git_repo_root;
 use codex_core::models_manager::manager::RefreshStrategy;
 use codex_core::protocol::AskForApproval;
@@ -39,8 +42,11 @@ use codex_core::protocol::Op;
 use codex_core::protocol::ReviewRequest;
 use codex_core::protocol::ReviewTarget;
 use codex_core::protocol::SessionSource;
+use codex_core::protocol::WarningEvent;
 use codex_protocol::approvals::ElicitationAction;
 use codex_protocol::config_types::SandboxMode;
+use codex_protocol::custom_commands::CustomCommand;
+use codex_protocol::custom_prompts::CustomPrompt;
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use event_processor_with_human_output::EventProcessorWithHumanOutput;
@@ -312,6 +318,26 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         .map(|(name, _)| name.clone())
         .collect();
 
+    let custom_commands_outcome =
+        codex_core::custom_commands::discover_custom_commands(config.cwd.as_path(), &config).await;
+    for error in &custom_commands_outcome.errors {
+        event_processor.process_event(Event {
+            id: String::new(),
+            msg: EventMsg::Warning(WarningEvent {
+                message: format!(
+                    "Custom command error in {}: {}",
+                    error.path.display(),
+                    error.message
+                ),
+            }),
+        });
+    }
+    let custom_prompts = if let Some(dir) = codex_core::custom_prompts::default_prompts_dir() {
+        codex_core::custom_prompts::discover_prompts_in(&dir).await
+    } else {
+        Vec::new()
+    };
+
     if oss {
         // We're in the oss section, so provider_id should be Some
         // Let's handle None case gracefully though just in case
@@ -378,6 +404,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
     } else {
         thread_manager.start_thread(config.clone()).await?
     };
+    let mut custom_command_overrides: Option<CustomCommandOverrides> = None;
     let (initial_operation, prompt_summary) = match (command, prompt, images) {
         (Some(ExecCommand::Review(review_cli)), _, _) => {
             let review_request = build_review_request(review_cli)?;
@@ -396,14 +423,23 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
                     }
                 })
                 .or(root_prompt);
-            let prompt_text = resolve_prompt(prompt_arg);
+            let prompt_customization = expand_prompt_with_customizations(
+                resolve_prompt(prompt_arg),
+                &custom_commands_outcome.commands,
+                &custom_prompts,
+            )
+            .map_err(prompt_expansion_failure)?;
+            custom_command_overrides = prompt_customization
+                .command
+                .as_ref()
+                .map(CustomCommandOverrides::from);
             let mut items: Vec<UserInput> = imgs
                 .into_iter()
                 .chain(args.images.into_iter())
                 .map(|path| UserInput::LocalImage { path })
                 .collect();
             items.push(UserInput::Text {
-                text: prompt_text.clone(),
+                text: prompt_customization.text.clone(),
                 // CLI input doesn't track UI element ranges, so none are available here.
                 text_elements: Vec::new(),
             });
@@ -413,17 +449,26 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
                     items,
                     output_schema,
                 },
-                prompt_text,
+                prompt_customization.text,
             )
         }
         (None, root_prompt, imgs) => {
-            let prompt_text = resolve_prompt(root_prompt);
+            let prompt_customization = expand_prompt_with_customizations(
+                resolve_prompt(root_prompt),
+                &custom_commands_outcome.commands,
+                &custom_prompts,
+            )
+            .map_err(prompt_expansion_failure)?;
+            custom_command_overrides = prompt_customization
+                .command
+                .as_ref()
+                .map(CustomCommandOverrides::from);
             let mut items: Vec<UserInput> = imgs
                 .into_iter()
                 .map(|path| UserInput::LocalImage { path })
                 .collect();
             items.push(UserInput::Text {
-                text: prompt_text.clone(),
+                text: prompt_customization.text.clone(),
                 // CLI input doesn't track UI element ranges, so none are available here.
                 text_elements: Vec::new(),
             });
@@ -433,7 +478,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
                     items,
                     output_schema,
                 },
-                prompt_text,
+                prompt_customization.text,
             )
         }
     };
@@ -495,18 +540,33 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
             items,
             output_schema,
         } => {
+            let (model, allowed_tools, disable_model_invocation) =
+                if let Some(overrides) = custom_command_overrides.as_ref() {
+                    (
+                        overrides
+                            .model
+                            .clone()
+                            .unwrap_or_else(|| default_model.clone()),
+                        overrides.allowed_tools.clone(),
+                        overrides.disable_model_invocation,
+                    )
+                } else {
+                    (default_model.clone(), None, None)
+                };
             let task_id = thread
                 .submit(Op::UserTurn {
                     items,
                     cwd: default_cwd,
                     approval_policy: default_approval_policy,
                     sandbox_policy: default_sandbox_policy.clone(),
-                    model: default_model,
+                    model,
                     effort: default_effort,
                     summary: default_summary,
                     final_output_json_schema: output_schema,
                     collaboration_mode: None,
                     personality: None,
+                    allowed_tools,
+                    disable_model_invocation,
                 })
                 .await?;
             info!("Sent prompt with event ID: {task_id}");
@@ -759,6 +819,56 @@ fn decode_utf16(
         .collect();
 
     String::from_utf16(&units).map_err(|_| PromptDecodeError::InvalidUtf16 { encoding })
+}
+
+fn prompt_expansion_failure(err: PromptExpansionError) -> anyhow::Error {
+    anyhow::anyhow!(err.user_message())
+}
+
+#[derive(Debug, Clone)]
+struct PromptCustomization {
+    text: String,
+    command: Option<CustomCommand>,
+}
+
+#[derive(Debug, Clone)]
+struct CustomCommandOverrides {
+    allowed_tools: Option<Vec<String>>,
+    model: Option<String>,
+    disable_model_invocation: Option<bool>,
+}
+
+impl From<&CustomCommand> for CustomCommandOverrides {
+    fn from(command: &CustomCommand) -> Self {
+        Self {
+            allowed_tools: command.allowed_tools.clone(),
+            model: command.model.clone(),
+            disable_model_invocation: command.disable_model_invocation,
+        }
+    }
+}
+
+fn expand_prompt_with_customizations(
+    prompt_text: String,
+    commands: &[CustomCommand],
+    prompts: &[CustomPrompt],
+) -> Result<PromptCustomization, PromptExpansionError> {
+    if let Some(expanded) = expand_custom_prompt_text(&prompt_text, prompts)? {
+        return Ok(PromptCustomization {
+            text: expanded,
+            command: None,
+        });
+    }
+    if let Some(expanded) = expand_custom_command(&prompt_text, commands) {
+        return Ok(PromptCustomization {
+            text: expanded.text,
+            command: Some(expanded.command),
+        });
+    }
+    Ok(PromptCustomization {
+        text: prompt_text,
+        command: None,
+    })
 }
 
 fn resolve_prompt(prompt_arg: Option<String>) -> String {

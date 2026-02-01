@@ -295,6 +295,8 @@ impl TestCodex {
                 summary: ReasoningSummary::Auto,
                 collaboration_mode: None,
                 personality: None,
+                allowed_tools: None,
+                disable_model_invocation: None,
             })
             .await?;
 
