@@ -787,7 +787,6 @@ impl Session {
         per_turn_config: Config,
         model_info: ModelInfo,
         sub_id: String,
-        transport_manager: TransportManager,
         turn_overrides: TurnOverrides,
     ) -> TurnContext {
         let reasoning_effort = session_configuration.collaboration_mode.reasoning_effort();
@@ -1465,7 +1464,6 @@ impl Session {
             per_turn_config,
             model_info,
             sub_id,
-            self.services.transport_manager.clone(),
             turn_overrides,
         );
 
@@ -5950,7 +5948,6 @@ mod tests {
             per_turn_config,
             model_info,
             "turn_id".to_string(),
-            services.transport_manager.clone(),
             TurnOverrides::default(),
         );
 
@@ -6082,7 +6079,6 @@ mod tests {
             per_turn_config,
             model_info,
             "turn_id".to_string(),
-            services.transport_manager.clone(),
             TurnOverrides::default(),
         ));
 
