@@ -1726,6 +1726,7 @@ impl ChatWidget {
             local_images,
             text_elements,
             mention_paths: _,
+            command_overrides: _,
         } = user_message;
         let local_image_paths = local_images.into_iter().map(|img| img.path).collect();
         self.bottom_pane
@@ -3436,6 +3437,7 @@ impl ChatWidget {
                         .take_recent_submission_images_with_placeholders(),
                     text_elements: prepared_elements,
                     mention_paths: self.bottom_pane.take_mention_paths(),
+                    command_overrides: None,
                 };
                 if self.is_session_configured() {
                     self.reasoning_buffer.clear();
@@ -6497,6 +6499,7 @@ impl ChatWidget {
             local_images: Vec::new(),
             text_elements: Vec::new(),
             mention_paths: HashMap::new(),
+            command_overrides: None,
         };
         if should_queue {
             self.queue_user_message(user_message);
