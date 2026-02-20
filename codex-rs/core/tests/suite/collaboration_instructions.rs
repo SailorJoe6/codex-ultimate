@@ -223,9 +223,6 @@ async fn override_then_next_turn_uses_updated_collaboration_instructions() -> Re
                 text_elements: Vec::new(),
             }],
             final_output_json_schema: None,
-            personality: None,
-            allowed_tools: None,
-            disable_model_invocation: None,
         })
         .await?;
     wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;

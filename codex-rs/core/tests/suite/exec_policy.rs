@@ -58,6 +58,8 @@ async fn submit_user_turn(
             summary: ReasoningSummary::Auto,
             collaboration_mode,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
     Ok(())

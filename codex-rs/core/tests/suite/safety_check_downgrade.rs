@@ -52,6 +52,8 @@ async fn openai_model_header_mismatch_emits_warning_event_and_warning_item() -> 
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -149,6 +151,8 @@ async fn response_model_field_mismatch_emits_warning_when_header_matches_request
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -233,6 +237,8 @@ async fn openai_model_header_mismatch_only_emits_one_warning_per_turn() -> Resul
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -281,6 +287,8 @@ async fn openai_model_header_casing_only_mismatch_does_not_warn() -> Result<()> 
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 

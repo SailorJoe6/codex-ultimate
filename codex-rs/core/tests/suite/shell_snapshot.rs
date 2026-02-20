@@ -318,6 +318,8 @@ async fn run_tool_turn_on_harness(
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 

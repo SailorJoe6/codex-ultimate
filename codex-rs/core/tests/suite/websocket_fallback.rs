@@ -165,6 +165,8 @@ async fn websocket_fallback_hides_first_websocket_retry_stream_error() -> Result
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 

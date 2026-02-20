@@ -353,6 +353,8 @@ console.log(out.output?.body?.text ?? "");
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -751,6 +753,8 @@ async fn view_image_tool_returns_unsupported_message_for_text_only_model() -> an
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 

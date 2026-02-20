@@ -2056,6 +2056,8 @@ async fn unified_exec_interrupt_terminates_long_running_session() -> Result<()> 
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 

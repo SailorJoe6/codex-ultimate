@@ -181,6 +181,8 @@ async fn user_shell_command_does_not_replace_active_turn() -> anyhow::Result<()>
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 

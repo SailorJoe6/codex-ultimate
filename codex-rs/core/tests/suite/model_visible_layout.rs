@@ -100,6 +100,8 @@ async fn snapshot_model_visible_layout_turn_overrides() -> Result<()> {
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
     wait_for_event(&test.codex, |event| {
@@ -122,6 +124,8 @@ async fn snapshot_model_visible_layout_turn_overrides() -> Result<()> {
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: Some(Personality::Friendly),
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
     wait_for_event(&test.codex, |event| {
@@ -199,6 +203,8 @@ async fn snapshot_model_visible_layout_cwd_change_does_not_refresh_agents() -> R
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
     wait_for_event(&test.codex, |event| {
@@ -221,6 +227,8 @@ async fn snapshot_model_visible_layout_cwd_change_does_not_refresh_agents() -> R
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
     wait_for_event(&test.codex, |event| {
@@ -324,6 +332,8 @@ async fn snapshot_model_visible_layout_resume_with_personality_change() -> Resul
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: Some(Personality::Friendly),
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
     wait_for_event(&resumed.codex, |event| {

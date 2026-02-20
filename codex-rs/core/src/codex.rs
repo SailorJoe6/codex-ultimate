@@ -7527,6 +7527,7 @@ mod tests {
             None,
             "turn_id".to_string(),
             Arc::clone(&js_repl),
+            TurnOverrides::default(),
         );
 
         let session = Session {
@@ -7683,6 +7684,7 @@ mod tests {
             None,
             "turn_id".to_string(),
             Arc::clone(&js_repl),
+            TurnOverrides::default(),
         ));
 
         let session = Arc::new(Session {

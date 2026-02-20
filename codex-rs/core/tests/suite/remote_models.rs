@@ -178,6 +178,8 @@ async fn remote_models_long_model_slug_is_sent_with_high_reasoning() -> Result<(
             summary: config.model_reasoning_summary,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 

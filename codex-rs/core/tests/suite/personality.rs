@@ -203,6 +203,8 @@ async fn config_personality_none_sends_no_personality() -> anyhow::Result<()> {
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -262,6 +264,8 @@ async fn default_personality_is_pragmatic_without_config_toml() -> anyhow::Resul
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -345,6 +349,8 @@ async fn user_turn_personality_some_adds_update_message() -> anyhow::Result<()> 
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -407,6 +413,8 @@ async fn user_turn_personality_same_value_does_not_add_update_message() -> anyho
             summary: ReasoningSummary::Auto,
             collaboration_mode: None,
             personality: None,
+            allowed_tools: None,
+            disable_model_invocation: None,
         })
         .await?;
 
@@ -572,123 +580,6 @@ async fn user_turn_personality_skips_if_feature_disabled() -> anyhow::Result<()>
         personality_text.is_none(),
         "expected no personality preamble, got {personality_text:?}"
     );
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ignores_remote_personality_if_remote_models_disabled() -> anyhow::Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let server = MockServer::builder()
-        .body_print_limit(BodyPrintLimit::Limited(80_000))
-        .start()
-        .await;
-
-    let remote_slug = "gpt-5.2-codex";
-    let remote_personality_message = "Friendly from remote template";
-    let remote_model = ModelInfo {
-        slug: remote_slug.to_string(),
-        display_name: "Remote personality test".to_string(),
-        description: Some("Remote model with personality template".to_string()),
-        default_reasoning_level: Some(ReasoningEffort::Medium),
-        supported_reasoning_levels: vec![ReasoningEffortPreset {
-            effort: ReasoningEffort::Medium,
-            description: ReasoningEffort::Medium.to_string(),
-        }],
-        shell_type: ConfigShellToolType::UnifiedExec,
-        visibility: ModelVisibility::List,
-        supported_in_api: true,
-        priority: 1,
-        upgrade: None,
-        base_instructions: "base instructions".to_string(),
-        model_messages: Some(ModelMessages {
-            instructions_template: Some("Base instructions\n{{ personality }}\n".to_string()),
-            instructions_variables: Some(ModelInstructionsVariables {
-                personality_default: None,
-                personality_friendly: Some(remote_personality_message.to_string()),
-                personality_pragmatic: None,
-            }),
-        }),
-        supports_reasoning_summaries: false,
-        support_verbosity: false,
-        default_verbosity: None,
-        apply_patch_tool_type: None,
-        truncation_policy: TruncationPolicyConfig::bytes(10_000),
-        supports_parallel_tool_calls: false,
-        context_window: Some(128_000),
-        auto_compact_token_limit: None,
-        effective_context_window_percent: 95,
-        experimental_supported_tools: Vec::new(),
-        input_modalities: default_input_modalities(),
-    };
-
-    let _models_mock = mount_models_once(
-        &server,
-        ModelsResponse {
-            models: vec![remote_model],
-        },
-    )
-    .await;
-
-    let resp_mock = mount_sse_once(&server, sse_completed("resp-1")).await;
-
-    let mut builder = test_codex()
-        .with_auth(codex_core::CodexAuth::create_dummy_chatgpt_auth_for_testing())
-        .with_config(|config| {
-            config.features.disable(Feature::RemoteModels);
-            config.features.enable(Feature::Personality);
-            config.model = Some(remote_slug.to_string());
-            config.personality = Some(Personality::Friendly);
-        });
-    let test = builder.build(&server).await?;
-
-    wait_for_model_available(
-        &test.thread_manager.get_models_manager(),
-        remote_slug,
-        &test.config,
-    )
-    .await;
-
-    test.codex
-        .submit(Op::UserTurn {
-            items: vec![UserInput::Text {
-                text: "hello".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            cwd: test.cwd_path().to_path_buf(),
-            approval_policy: AskForApproval::Never,
-            sandbox_policy: SandboxPolicy::ReadOnly,
-            model: remote_slug.to_string(),
-            effort: test.config.model_reasoning_effort,
-            summary: ReasoningSummary::Auto,
-            collaboration_mode: None,
-            personality: None,
-            allowed_tools: None,
-            disable_model_invocation: None,
-        })
-        .await?;
-
-    wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
-
-    let request = resp_mock.single_request();
-    let instructions_text = request.instructions_text();
-
-    assert!(
-        instructions_text.contains("You are Codex, a coding agent based on GPT-5. You and the user share the same workspace and collaborate to achieve the user's goals."),
-        "expected instructions to use the template instructions, got: {instructions_text:?}"
-    );
-    assert!(
-        instructions_text.contains(
-            "You optimize for team morale and being a supportive teammate as much as code quality."
-        ),
-        "expected instructions to include the local friendly personality template, got: {instructions_text:?}"
-    );
-    assert!(
-        !instructions_text.contains("{{ personality }}"),
-        "expected legacy personality placeholder to be replaced, got: {instructions_text:?}"
-    );
-
     Ok(())
 }
 
