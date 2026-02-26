@@ -28,12 +28,15 @@ use codex_protocol::protocol::CollabResumeBeginEvent;
 use codex_protocol::protocol::CollabResumeEndEvent;
 use codex_protocol::protocol::CollabWaitingBeginEvent;
 use codex_protocol::protocol::CollabWaitingEndEvent;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 pub struct MultiAgentHandler;
 
@@ -89,10 +92,29 @@ impl ToolHandler for MultiAgentHandler {
     }
 }
 
+async fn emit_role_warnings(
+    session: &Arc<Session>,
+    turn: &Arc<TurnContext>,
+    warnings: Vec<String>,
+) {
+    for warning in warnings {
+        session
+            .send_event(
+                turn,
+                EventMsg::Warning(WarningEvent {
+                    message: warning.clone(),
+                }),
+            )
+            .await;
+        session.record_model_warning(warning, turn).await;
+    }
+}
+
 mod spawn {
     use super::*;
     use crate::agent::control::SpawnAgentOptions;
     use crate::agent::role::DEFAULT_ROLE_NAME;
+    use crate::agent::role::MissingRoleBehavior;
     use crate::agent::role::apply_role_to_config;
 
     use crate::agent::exceeds_thread_spawn_depth_limit;
@@ -149,9 +171,10 @@ mod spawn {
             .await;
         let mut config =
             build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
-        apply_role_to_config(&mut config, role_name)
+        let outcome = apply_role_to_config(&mut config, role_name, MissingRoleBehavior::Error)
             .await
             .map_err(FunctionCallError::RespondToModel)?;
+        emit_role_warnings(&session, &turn, outcome.warnings).await;
         apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
         apply_spawn_agent_overrides(&mut config, child_depth);
 
@@ -320,6 +343,9 @@ mod send_input {
 mod resume_agent {
     use super::*;
     use crate::agent::next_thread_spawn_depth;
+    use crate::agent::role::MissingRoleBehavior;
+    use crate::agent::role::apply_role_to_config_with_resolution_config;
+    use crate::config::ConfigBuilder;
     use std::sync::Arc;
 
     #[derive(Debug, Deserialize)]
@@ -436,14 +462,83 @@ mod resume_agent {
         receiver_thread_id: ThreadId,
         child_depth: i32,
     ) -> Result<AgentStatus, FunctionCallError> {
-        let config = build_agent_resume_config(turn.as_ref(), child_depth)?;
+        let mut config = build_agent_resume_config(turn.as_ref(), child_depth)?;
+        let thread_id_str = receiver_thread_id.to_string();
+        let recorded_role = match crate::find_thread_path_by_id_str(
+            config.codex_home.as_path(),
+            &thread_id_str,
+        )
+        .await
+        {
+            Ok(Some(rollout_path)) => match crate::read_session_meta_line(&rollout_path).await {
+                Ok(session_meta_line) => session_meta_line.meta.agent_role,
+                Err(err) => {
+                    emit_role_warnings(
+                        session,
+                        turn,
+                        vec![format!(
+                            "Failed to read session metadata while resuming agent {receiver_thread_id}: {err}. Continuing with default role."
+                        )],
+                    )
+                    .await;
+                    None
+                }
+            },
+            Ok(None) => None,
+            Err(err) => {
+                emit_role_warnings(
+                    session,
+                    turn,
+                    vec![format!(
+                        "Failed to locate rollout while resuming agent {receiver_thread_id}: {err}. Continuing with default role."
+                    )],
+                )
+                .await;
+                None
+            }
+        };
+
+        let role_resolution_config = match ConfigBuilder::default()
+            .codex_home(config.codex_home.clone())
+            .fallback_cwd(Some(turn.cwd.clone()))
+            .build()
+            .await
+        {
+            Ok(loaded_config) => loaded_config,
+            Err(err) => {
+                emit_role_warnings(
+                    session,
+                    turn,
+                    vec![format!(
+                        "Failed to reload current config while resuming agent {receiver_thread_id}: {err}. Continuing with current turn config for role resolution."
+                    )],
+                )
+                .await;
+                config.clone()
+            }
+        };
+        let role_outcome = apply_role_to_config_with_resolution_config(
+            &mut config,
+            recorded_role.as_deref(),
+            MissingRoleBehavior::Error,
+            &role_resolution_config,
+        )
+        .await
+        .map_err(FunctionCallError::RespondToModel)?;
+        emit_role_warnings(session, turn, role_outcome.warnings).await;
+        apply_spawn_agent_overrides(&mut config, child_depth);
+
         let resumed_thread_id = session
             .services
             .agent_control
             .resume_agent_from_rollout(
                 config,
                 receiver_thread_id,
-                thread_spawn_source(session.conversation_id, child_depth, None),
+                thread_spawn_source(
+                    session.conversation_id,
+                    child_depth,
+                    recorded_role.as_deref(),
+                ),
             )
             .await
             .map_err(|err| collab_agent_error(receiver_thread_id, err))?;
@@ -966,14 +1061,19 @@ mod tests {
     use crate::ThreadManager;
     use crate::built_in_model_providers;
     use crate::codex::make_session_and_context;
+    use crate::codex::make_session_and_context_with_rx;
+    use crate::config::AgentRoleConfig;
     use crate::config::DEFAULT_AGENT_MAX_DEPTH;
     use crate::config::types::ShellEnvironmentPolicy;
     use crate::function_tool::FunctionCallError;
     use crate::protocol::AskForApproval;
+    use crate::protocol::Event;
+    use crate::protocol::EventMsg;
     use crate::protocol::Op;
     use crate::protocol::SandboxPolicy;
     use crate::protocol::SessionSource;
     use crate::protocol::SubAgentSource;
+    use crate::protocol::WarningEvent;
     use crate::turn_diff_tracker::TurnDiffTracker;
     use codex_protocol::ThreadId;
     use codex_protocol::models::ContentItem;
@@ -988,6 +1088,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::Mutex;
+    use tokio::time::sleep;
     use tokio::time::timeout;
 
     fn invocation(
@@ -1017,6 +1118,95 @@ mod tests {
             CodexAuth::from_api_key("dummy"),
             built_in_model_providers()["openai"].clone(),
         )
+    }
+
+    async fn collect_warning_messages(
+        rx: &async_channel::Receiver<Event>,
+        expected_warning_count: usize,
+    ) -> Vec<String> {
+        let start = std::time::Instant::now();
+        let deadline = Duration::from_secs(2);
+        let mut warnings = Vec::new();
+        while warnings.len() < expected_warning_count {
+            let remaining = deadline.saturating_sub(start.elapsed());
+            if remaining.is_zero() {
+                break;
+            }
+            let event = match timeout(remaining, rx.recv()).await {
+                Ok(Ok(event)) => event,
+                Ok(Err(_)) | Err(_) => break,
+            };
+            if let EventMsg::Warning(WarningEvent { message }) = event.msg {
+                warnings.push(message);
+            }
+        }
+        warnings
+    }
+
+    fn collect_model_warning_messages(history_items: &[ResponseItem]) -> Vec<String> {
+        history_items
+            .iter()
+            .filter_map(|item| {
+                let ResponseItem::Message { role, content, .. } = item else {
+                    return None;
+                };
+                if role != "user" {
+                    return None;
+                }
+                let [ContentItem::InputText { text }] = content.as_slice() else {
+                    return None;
+                };
+                text.strip_prefix("Warning: ").map(str::to_string)
+            })
+            .collect()
+    }
+
+    async fn spawn_child_with_role(
+        manager: &ThreadManager,
+        config: Config,
+        parent_thread_id: ThreadId,
+        role: &str,
+    ) -> ThreadId {
+        manager
+            .agent_control()
+            .spawn_agent(
+                config,
+                vec![UserInput::Text {
+                    text: "materialized".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                    parent_thread_id,
+                    depth: 1,
+                    agent_nickname: None,
+                    agent_role: Some(role.to_string()),
+                })),
+            )
+            .await
+            .expect("child spawn should succeed")
+    }
+
+    async fn wait_for_persisted_agent_role(
+        codex_home: &std::path::Path,
+        thread_id: ThreadId,
+        role: &str,
+    ) {
+        let thread_id_str = thread_id.to_string();
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(Some(rollout_path)) =
+                    crate::find_thread_path_by_id_str(codex_home, &thread_id_str).await
+                    && let Ok(session_meta_line) =
+                        crate::read_session_meta_line(&rollout_path).await
+                    && session_meta_line.meta.agent_role.as_deref() == Some(role)
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("child thread metadata should be persisted before shutdown");
     }
 
     #[tokio::test]
@@ -1343,6 +1533,70 @@ mod tests {
                 .is_some_and(|nickname| !nickname.is_empty())
         );
         assert_eq!(success, Some(true));
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_emits_warning_event_and_model_warning_for_each_role_issue() {
+        #[derive(Debug, Deserialize)]
+        struct SpawnAgentResult {
+            agent_id: String,
+        }
+
+        let (mut session, mut turn, rx) = make_session_and_context_with_rx().await;
+        let manager = thread_manager();
+        Arc::get_mut(&mut session)
+            .expect("session should be uniquely owned")
+            .services
+            .agent_control = manager.agent_control();
+        let turn_mut = Arc::get_mut(&mut turn).expect("turn should be uniquely owned");
+        let mut config = (*turn_mut.config).clone();
+        config.agent_roles.insert(
+            "custom".to_string(),
+            AgentRoleConfig {
+                description: None,
+                profile: Some("missing-profile".to_string()),
+                config_file: Some(PathBuf::from("/path/does/not/exist.toml")),
+            },
+        );
+        turn_mut.config = Arc::new(config);
+
+        let output = MultiAgentHandler
+            .handle(invocation(
+                session.clone(),
+                turn.clone(),
+                "spawn_agent",
+                function_payload(json!({"message": "inspect", "agent_type": "custom"})),
+            ))
+            .await
+            .expect("spawn_agent should succeed");
+        let ToolOutput::Function {
+            body: FunctionCallOutputBody::Text(content),
+            ..
+        } = output
+        else {
+            panic!("expected function output");
+        };
+        let result: SpawnAgentResult =
+            serde_json::from_str(&content).expect("spawn_agent result should be json");
+        let spawned_thread_id = agent_id(&result.agent_id).expect("agent id should be valid");
+
+        let warning_messages = collect_warning_messages(&rx, 2).await;
+        assert_eq!(warning_messages.len(), 2);
+        assert!(warning_messages[0].contains("profile `missing-profile`"));
+        assert!(warning_messages[1].contains("config_file"));
+
+        let history = session.clone_history().await;
+        let role_warning_messages = collect_model_warning_messages(history.raw_items())
+            .into_iter()
+            .filter(|warning| warning.contains("Role `custom`"))
+            .count();
+        assert_eq!(role_warning_messages, 2);
+
+        let _ = manager
+            .agent_control()
+            .shutdown_agent(spawned_thread_id)
+            .await
+            .expect("shutdown spawned agent");
     }
 
     #[tokio::test]
@@ -1691,6 +1945,206 @@ mod tests {
             .shutdown_agent(agent_id)
             .await
             .expect("shutdown resumed agent");
+    }
+
+    #[tokio::test]
+    async fn resume_agent_reloads_current_config_and_applies_recorded_role() {
+        let (mut session, turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
+        let child_thread_id = spawn_child_with_role(
+            &manager,
+            turn.config.as_ref().clone(),
+            session.conversation_id,
+            "custom",
+        )
+        .await;
+        wait_for_persisted_agent_role(turn.config.codex_home.as_path(), child_thread_id, "custom")
+            .await;
+        let _ = manager
+            .agent_control()
+            .shutdown_agent(child_thread_id)
+            .await
+            .expect("shutdown child thread");
+        assert_eq!(
+            manager.agent_control().get_status(child_thread_id).await,
+            AgentStatus::NotFound
+        );
+
+        let config_toml_path = turn.config.codex_home.join("config.toml");
+        tokio::fs::write(
+            &config_toml_path,
+            r#"[profiles.local]
+model = "gpt-5.1-codex-mini"
+
+[agents.custom]
+profile = "local"
+"#,
+        )
+        .await
+        .expect("write current config");
+
+        let output = MultiAgentHandler
+            .handle(invocation(
+                Arc::new(session),
+                Arc::new(turn),
+                "resume_agent",
+                function_payload(json!({"id": child_thread_id.to_string()})),
+            ))
+            .await
+            .expect("resume_agent should succeed");
+        let ToolOutput::Function {
+            body: FunctionCallOutputBody::Text(content),
+            success,
+            ..
+        } = output
+        else {
+            panic!("expected function output");
+        };
+        let result: resume_agent::ResumeAgentResult =
+            serde_json::from_str(&content).expect("resume_agent result should be json");
+        assert_ne!(result.status, AgentStatus::NotFound);
+        assert_eq!(success, Some(true));
+
+        let snapshot = manager
+            .get_thread(child_thread_id)
+            .await
+            .expect("resumed thread should exist")
+            .config_snapshot()
+            .await;
+        assert_eq!(snapshot.model, "gpt-5.1-codex-mini");
+        assert_eq!(snapshot.approval_policy, AskForApproval::Never);
+
+        let _ = manager
+            .agent_control()
+            .shutdown_agent(child_thread_id)
+            .await
+            .expect("shutdown resumed child thread");
+    }
+
+    #[tokio::test]
+    async fn resume_agent_fails_when_recorded_role_is_missing_from_current_config() {
+        let (mut session, turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
+        let child_thread_id = spawn_child_with_role(
+            &manager,
+            turn.config.as_ref().clone(),
+            session.conversation_id,
+            "custom",
+        )
+        .await;
+        wait_for_persisted_agent_role(turn.config.codex_home.as_path(), child_thread_id, "custom")
+            .await;
+        let _ = manager
+            .agent_control()
+            .shutdown_agent(child_thread_id)
+            .await
+            .expect("shutdown child thread");
+        assert_eq!(
+            manager.agent_control().get_status(child_thread_id).await,
+            AgentStatus::NotFound
+        );
+
+        let config_toml_path = turn.config.codex_home.join("config.toml");
+        tokio::fs::write(&config_toml_path, "")
+            .await
+            .expect("write current config");
+
+        let Err(err) = MultiAgentHandler
+            .handle(invocation(
+                Arc::new(session),
+                Arc::new(turn),
+                "resume_agent",
+                function_payload(json!({"id": child_thread_id.to_string()})),
+            ))
+            .await
+        else {
+            panic!("resume should fail when recorded role no longer exists");
+        };
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel("unknown agent_type 'custom'".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_agent_emits_warning_event_and_model_warning_for_each_role_issue() {
+        let (mut session, turn, rx) = make_session_and_context_with_rx().await;
+        let manager = thread_manager();
+        Arc::get_mut(&mut session)
+            .expect("session should be uniquely owned")
+            .services
+            .agent_control = manager.agent_control();
+        let child_thread_id = spawn_child_with_role(
+            &manager,
+            turn.config.as_ref().clone(),
+            session.conversation_id,
+            "custom",
+        )
+        .await;
+        wait_for_persisted_agent_role(turn.config.codex_home.as_path(), child_thread_id, "custom")
+            .await;
+        let _ = manager
+            .agent_control()
+            .shutdown_agent(child_thread_id)
+            .await
+            .expect("shutdown child thread");
+        assert_eq!(
+            manager.agent_control().get_status(child_thread_id).await,
+            AgentStatus::NotFound
+        );
+
+        let config_toml_path = turn.config.codex_home.join("config.toml");
+        tokio::fs::write(
+            &config_toml_path,
+            r#"[agents.custom]
+profile = "missing-profile"
+config_file = "missing-role-layer.toml"
+"#,
+        )
+        .await
+        .expect("write current config");
+
+        let output = MultiAgentHandler
+            .handle(invocation(
+                session.clone(),
+                turn.clone(),
+                "resume_agent",
+                function_payload(json!({"id": child_thread_id.to_string()})),
+            ))
+            .await
+            .expect("resume should continue after role warnings");
+        let ToolOutput::Function {
+            body: FunctionCallOutputBody::Text(content),
+            success,
+            ..
+        } = output
+        else {
+            panic!("expected function output");
+        };
+        let result: resume_agent::ResumeAgentResult =
+            serde_json::from_str(&content).expect("resume_agent result should be json");
+        assert_ne!(result.status, AgentStatus::NotFound);
+        assert_eq!(success, Some(true));
+
+        let warning_messages = collect_warning_messages(&rx, 2).await;
+        assert_eq!(warning_messages.len(), 2);
+        assert!(warning_messages[0].contains("profile `missing-profile`"));
+        assert!(warning_messages[1].contains("config_file"));
+
+        let history = session.clone_history().await;
+        let role_warning_messages = collect_model_warning_messages(history.raw_items())
+            .into_iter()
+            .filter(|warning| warning.contains("Role `custom`"))
+            .count();
+        assert_eq!(role_warning_messages, 2);
+
+        let _ = manager
+            .agent_control()
+            .shutdown_agent(child_thread_id)
+            .await
+            .expect("shutdown resumed child thread");
     }
 
     #[tokio::test]
