@@ -20,6 +20,10 @@
         "description": {
           "description": "Human-facing role documentation used in spawn tool guidance.",
           "type": "string"
+        },
+        "profile": {
+          "description": "Profile to use from the `profiles` map.",
+          "type": "string"
         }
       },
       "type": "object"
