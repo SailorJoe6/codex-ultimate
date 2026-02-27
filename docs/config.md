@@ -62,6 +62,16 @@ Unsupported keys inside a selected role `profile` are ignored; supported keys ar
 Explicit unknown `agent_type` values still fail spawn.
 Closed resume also fails when the recorded role for that sub-agent no longer exists.
 
+## Provider-Scoped Model Overrides
+
+Use `model_overrides` to override metadata for specific model providers and model slugs/prefixes.
+
+```toml
+[model_overrides.dgx_spark."qwen3-coder-next"]
+context_window = 262144
+effective_context_window_percent = 95
+```
+
 ## Notices
 
 Codex stores "do not show again" flags for some UI prompts under the `[notice]` table.

@@ -663,6 +663,22 @@
       },
       "type": "object"
     },
+    "ModelOverrideToml": {
+      "additionalProperties": false,
+      "properties": {
+        "context_window": {
+          "description": "Override model context window (in tokens) for matching provider/model entries.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "effective_context_window_percent": {
+          "description": "Override percentage of the context window considered usable for inputs.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "ModelProviderInfo": {
       "additionalProperties": false,
       "description": "Serializable representation of a provider definition.",
@@ -1923,6 +1939,17 @@
         }
       ],
       "description": "Optional path to a file containing model instructions that will override the built-in instructions for the selected model. Users are STRONGLY DISCOURAGED from using this field, as deviating from the instructions sanctioned by Codex will likely degrade model performance."
+    },
+    "model_overrides": {
+      "additionalProperties": {
+        "additionalProperties": {
+          "$ref": "#/definitions/ModelOverrideToml"
+        },
+        "type": "object"
+      },
+      "default": {},
+      "description": "Provider-scoped model metadata overrides keyed by provider then model slug/prefix.\n\nExample: [model_overrides.dgx_spark.\"qwen3-coder-next\"] context_window = 262144 effective_context_window_percent = 95",
+      "type": "object"
     },
     "model_provider": {
       "description": "Provider to use from the model_providers map.",

@@ -333,6 +333,9 @@ pub struct Config {
     /// Combined provider map (defaults merged with user-defined overrides).
     pub model_providers: HashMap<String, ModelProviderInfo>,
 
+    /// Provider-scoped model metadata overrides keyed by provider then model slug/prefix.
+    pub model_overrides: HashMap<String, HashMap<String, ModelOverrideToml>>,
+
     /// Maximum number of bytes to include from an AGENTS.md project doc file.
     pub project_doc_max_bytes: usize,
 
@@ -1103,6 +1106,15 @@ pub struct ConfigToml {
     #[serde(default)]
     pub model_providers: HashMap<String, ModelProviderInfo>,
 
+    /// Provider-scoped model metadata overrides keyed by provider then model slug/prefix.
+    ///
+    /// Example:
+    /// [model_overrides.dgx_spark."qwen3-coder-next"]
+    /// context_window = 262144
+    /// effective_context_window_percent = 95
+    #[serde(default)]
+    pub model_overrides: HashMap<String, HashMap<String, ModelOverrideToml>>,
+
     /// Maximum number of bytes to include from an AGENTS.md project doc file.
     pub project_doc_max_bytes: Option<usize>,
 
@@ -1270,6 +1282,15 @@ pub struct ConfigToml {
     pub experimental_use_freeform_apply_patch: Option<bool>,
     /// Preferred OSS provider for local models, e.g. "lmstudio" or "ollama".
     pub oss_provider: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct ModelOverrideToml {
+    /// Override model context window (in tokens) for matching provider/model entries.
+    pub context_window: Option<i64>,
+    /// Override percentage of the context window considered usable for inputs.
+    pub effective_context_window_percent: Option<i64>,
 }
 
 impl From<ConfigToml> for UserSavedConfig {
@@ -2118,6 +2139,7 @@ impl Config {
             mcp_oauth_callback_port: cfg.mcp_oauth_callback_port,
             mcp_oauth_callback_url: cfg.mcp_oauth_callback_url.clone(),
             model_providers,
+            model_overrides: cfg.model_overrides,
             project_doc_max_bytes: cfg.project_doc_max_bytes.unwrap_or(PROJECT_DOC_MAX_BYTES),
             project_doc_fallback_filenames: cfg
                 .project_doc_fallback_filenames
@@ -4672,6 +4694,33 @@ config_file = "./agents/researcher.toml"
         Ok(())
     }
 
+    #[test]
+    fn model_overrides_load_from_toml() {
+        let cfg: ConfigToml = toml::from_str(
+            r#"
+[model_overrides.dgx_spark."qwen3-coder-next"]
+context_window = 262144
+effective_context_window_percent = 95
+"#,
+        )
+        .expect("TOML deserialization should succeed");
+
+        assert_eq!(
+            cfg.model_overrides
+                .get("dgx_spark")
+                .and_then(|by_slug| by_slug.get("qwen3-coder-next"))
+                .and_then(|override_cfg| override_cfg.context_window),
+            Some(262_144)
+        );
+        assert_eq!(
+            cfg.model_overrides
+                .get("dgx_spark")
+                .and_then(|by_slug| by_slug.get("qwen3-coder-next"))
+                .and_then(|override_cfg| override_cfg.effective_context_window_percent),
+            Some(95)
+        );
+    }
+
     fn create_test_fixture() -> std::io::Result<PrecedenceTestFixture> {
         let toml = r#"
 model = "o3"
@@ -4824,6 +4873,7 @@ model_verbosity = "high"
                 mcp_oauth_callback_port: None,
                 mcp_oauth_callback_url: None,
                 model_providers: fixture.model_provider_map.clone(),
+                model_overrides: HashMap::new(),
                 project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
                 project_doc_fallback_filenames: Vec::new(),
                 tool_output_token_limit: None,
@@ -4951,6 +5001,7 @@ model_verbosity = "high"
             mcp_oauth_callback_port: None,
             mcp_oauth_callback_url: None,
             model_providers: fixture.model_provider_map.clone(),
+            model_overrides: HashMap::new(),
             project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
             project_doc_fallback_filenames: Vec::new(),
             tool_output_token_limit: None,
@@ -5076,6 +5127,7 @@ model_verbosity = "high"
             mcp_oauth_callback_port: None,
             mcp_oauth_callback_url: None,
             model_providers: fixture.model_provider_map.clone(),
+            model_overrides: HashMap::new(),
             project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
             project_doc_fallback_filenames: Vec::new(),
             tool_output_token_limit: None,
@@ -5187,6 +5239,7 @@ model_verbosity = "high"
             mcp_oauth_callback_port: None,
             mcp_oauth_callback_url: None,
             model_providers: fixture.model_provider_map.clone(),
+            model_overrides: HashMap::new(),
             project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
             project_doc_fallback_filenames: Vec::new(),
             tool_output_token_limit: None,

@@ -21,6 +21,21 @@ const LOCAL_PRAGMATIC_TEMPLATE: &str = "You are a deeply pragmatic, effective so
 const PERSONALITY_PLACEHOLDER: &str = "{{ personality }}";
 
 pub(crate) fn with_config_overrides(mut model: ModelInfo, config: &Config) -> ModelInfo {
+    if let Some(provider_overrides) = config.model_overrides.get(&config.model_provider_id)
+        && let Some((_, model_override)) = provider_overrides
+            .iter()
+            .filter(|(slug, _)| model.slug.starts_with(slug.as_str()))
+            .max_by_key(|(slug, _)| slug.len())
+    {
+        if let Some(context_window) = model_override.context_window {
+            model.context_window = Some(context_window);
+        }
+        if let Some(effective_context_window_percent) =
+            model_override.effective_context_window_percent
+        {
+            model.effective_context_window_percent = effective_context_window_percent;
+        }
+    }
     if let Some(supports_reasoning_summaries) = config.model_supports_reasoning_summaries
         && supports_reasoning_summaries
     {
@@ -109,8 +124,10 @@ fn local_personality_messages_for_slug(slug: &str) -> Option<ModelMessages> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ModelOverrideToml;
     use crate::config::test_config;
     use pretty_assertions::assert_eq;
+    use std::collections::HashMap;
 
     #[test]
     fn reasoning_summaries_override_true_enables_support() {
@@ -146,5 +163,59 @@ mod tests {
         let updated = with_config_overrides(model.clone(), &config);
 
         assert_eq!(updated, model);
+    }
+
+    #[test]
+    fn provider_scoped_model_override_updates_context_window() {
+        let model = model_info_from_slug("qwen3-coder-next");
+        let mut config = test_config();
+        config.model_provider_id = "dgx_spark".to_string();
+
+        let mut provider_overrides = HashMap::new();
+        provider_overrides.insert(
+            "qwen3-coder-next".to_string(),
+            ModelOverrideToml {
+                context_window: Some(262_144),
+                effective_context_window_percent: Some(94),
+            },
+        );
+        config
+            .model_overrides
+            .insert("dgx_spark".to_string(), provider_overrides);
+
+        let updated = with_config_overrides(model, &config);
+
+        assert_eq!(updated.context_window, Some(262_144));
+        assert_eq!(updated.effective_context_window_percent, 94);
+    }
+
+    #[test]
+    fn provider_scoped_model_override_prefers_longest_prefix() {
+        let model = model_info_from_slug("qwen3-coder-next-2026-01-01");
+        let mut config = test_config();
+        config.model_provider_id = "dgx_spark".to_string();
+
+        let mut provider_overrides = HashMap::new();
+        provider_overrides.insert(
+            "qwen3-coder".to_string(),
+            ModelOverrideToml {
+                context_window: Some(111_111),
+                effective_context_window_percent: None,
+            },
+        );
+        provider_overrides.insert(
+            "qwen3-coder-next".to_string(),
+            ModelOverrideToml {
+                context_window: Some(262_144),
+                effective_context_window_percent: None,
+            },
+        );
+        config
+            .model_overrides
+            .insert("dgx_spark".to_string(), provider_overrides);
+
+        let updated = with_config_overrides(model, &config);
+
+        assert_eq!(updated.context_window, Some(262_144));
     }
 }
