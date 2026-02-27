@@ -57,6 +57,8 @@ For closed-agent resume, Codex re-reads current config files before role resolut
 
 If role `profile` or `config_file` cannot be applied, Codex continues with remaining valid layers and emits warnings (both a warning event and a model-visible warning message) for each occurrence.
 
+Unsupported keys inside a selected role `profile` are ignored; supported keys are still applied, and each ignored key emits a warning.
+
 Explicit unknown `agent_type` values still fail spawn.
 Closed resume also fails when the recorded role for that sub-agent no longer exists.
 
