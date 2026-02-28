@@ -17,6 +17,9 @@ use codex_protocol::protocol::EventMsg;
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
+const POST_COMPLETION_RETRY_THRESHOLD: u8 = 5;
+const POST_COMPLETION_RETRY_GUIDANCE: &str = "Your plan is already complete. Do not revise completed step text or explanation. If new work exists, add a step or change a step status; otherwise provide final response.";
+
 pub struct PlanHandler;
 
 pub static PLAN_TOOL: LazyLock<ToolSpec> = LazyLock::new(|| {
@@ -102,7 +105,7 @@ pub(crate) async fn handle_update_plan(
     session: &Session,
     turn_context: &TurnContext,
     arguments: String,
-    _call_id: String,
+    call_id: String,
 ) -> Result<String, FunctionCallError> {
     if turn_context.collaboration_mode.mode == ModeKind::Plan {
         return Err(FunctionCallError::RespondToModel(
@@ -110,6 +113,44 @@ pub(crate) async fn handle_update_plan(
         ));
     }
     let args = parse_update_plan_arguments(&arguments)?;
+    let turn_state = {
+        let active_turn = session.active_turn.lock().await;
+        active_turn
+            .as_ref()
+            .map(|active_turn| active_turn.turn_state.clone())
+    };
+    let retry_attempt = if let Some(turn_state) = turn_state {
+        let mut turn_state = turn_state.lock().await;
+        turn_state.register_update_plan(&args)
+    } else {
+        None
+    };
+
+    if let Some(retry_attempt) = retry_attempt {
+        if retry_attempt >= POST_COMPLETION_RETRY_THRESHOLD {
+            session
+                .services
+                .agent_control
+                .shutdown_agent(session.conversation_id)
+                .await
+                .map_err(|err| {
+                    FunctionCallError::Fatal(format!(
+                        "failed to shutdown session after repeated update_plan retries: {err}"
+                    ))
+                })?;
+            return Err(FunctionCallError::Fatal(format!(
+                "update_plan post-completion no-progress retry threshold reached for call_id {call_id}; shutting down session"
+            )));
+        }
+
+        session
+            .send_event(turn_context, EventMsg::PlanUpdate(args))
+            .await;
+        return Err(FunctionCallError::RespondToModel(
+            POST_COMPLETION_RETRY_GUIDANCE.to_string(),
+        ));
+    }
+
     session
         .send_event(turn_context, EventMsg::PlanUpdate(args))
         .await;
@@ -120,4 +161,102 @@ fn parse_update_plan_arguments(arguments: &str) -> Result<UpdatePlanArgs, Functi
     serde_json::from_str::<UpdatePlanArgs>(arguments).map_err(|e| {
         FunctionCallError::RespondToModel(format!("failed to parse function arguments: {e}"))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codex::make_session_and_context;
+    use crate::state::ActiveTurn;
+    use pretty_assertions::assert_eq;
+    use std::sync::Arc;
+
+    fn completed_plan_args(explanation: &str) -> String {
+        format!(
+            r#"{{
+            "explanation": "{explanation}",
+            "plan": [
+                {{"step":"Inspect workspace","status":"completed"}},
+                {{"step":"Report results","status":"completed"}}
+            ]
+        }}"#
+        )
+    }
+
+    async fn make_session_for_mode(mode: ModeKind) -> (Arc<Session>, Arc<TurnContext>) {
+        let (session, mut turn_context) = make_session_and_context().await;
+        turn_context.collaboration_mode.mode = mode;
+        let session = Arc::new(session);
+        let turn_context = Arc::new(turn_context);
+        *session.active_turn.lock().await = Some(ActiveTurn::default());
+        (session, turn_context)
+    }
+
+    async fn call_update_plan_for_mode(mode: ModeKind) -> Result<String, FunctionCallError> {
+        let (session, turn_context) = make_session_for_mode(mode).await;
+        handle_update_plan(
+            session.as_ref(),
+            turn_context.as_ref(),
+            completed_plan_args("complete"),
+            "plan-call".to_string(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn update_plan_allowed_modes_accept_calls() {
+        let default_result = call_update_plan_for_mode(ModeKind::Default).await;
+        assert_eq!(default_result, Ok("Plan updated".to_string()));
+
+        let execute_result = call_update_plan_for_mode(ModeKind::Execute).await;
+        assert_eq!(execute_result, Ok("Plan updated".to_string()));
+
+        let pair_result = call_update_plan_for_mode(ModeKind::PairProgramming).await;
+        assert_eq!(pair_result, Ok("Plan updated".to_string()));
+    }
+
+    #[tokio::test]
+    async fn update_plan_plan_mode_rejects_calls() {
+        let result = call_update_plan_for_mode(ModeKind::Plan).await;
+        assert_eq!(
+            result,
+            Err(FunctionCallError::RespondToModel(
+                "update_plan is a TODO/checklist tool and is not allowed in Plan mode".to_string()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn update_plan_retry_guard_applies_in_allowed_modes() {
+        for mode in [
+            ModeKind::Default,
+            ModeKind::Execute,
+            ModeKind::PairProgramming,
+        ] {
+            let (session, turn_context) = make_session_for_mode(mode).await;
+
+            let baseline = handle_update_plan(
+                session.as_ref(),
+                turn_context.as_ref(),
+                completed_plan_args("baseline"),
+                "plan-baseline".to_string(),
+            )
+            .await;
+            assert_eq!(baseline, Ok("Plan updated".to_string()));
+
+            let retry = handle_update_plan(
+                session.as_ref(),
+                turn_context.as_ref(),
+                completed_plan_args("changed explanation"),
+                "plan-retry".to_string(),
+            )
+            .await;
+            assert_eq!(
+                retry,
+                Err(FunctionCallError::RespondToModel(
+                    POST_COMPLETION_RETRY_GUIDANCE.to_string()
+                ))
+            );
+        }
+    }
 }

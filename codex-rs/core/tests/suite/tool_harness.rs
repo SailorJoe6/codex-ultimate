@@ -25,6 +25,7 @@ use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
+use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
 fn call_output(req: &ResponsesRequest, call_id: &str) -> (String, Option<bool>) {
@@ -270,6 +271,145 @@ async fn update_plan_tool_rejects_malformed_payload() -> anyhow::Result<()> {
             "expected tool output to mark success=false for malformed payload"
         );
     }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_plan_post_completion_retries_shutdown_on_fifth_no_progress_attempt()
+-> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+
+    let mut builder = test_codex();
+    let TestCodex {
+        codex,
+        cwd,
+        session_configured,
+        thread_manager: _thread_manager,
+        ..
+    } = builder.build(&server).await?;
+
+    let call_ids = vec![
+        "plan-call-1",
+        "plan-call-2",
+        "plan-call-3",
+        "plan-call-4",
+        "plan-call-5",
+        "plan-call-6",
+    ];
+    let plans = vec![
+        json!({
+            "explanation": "baseline",
+            "plan": [
+                {"step": "Inspect workspace", "status": "completed"},
+                {"step": "Report results", "status": "completed"},
+            ],
+        })
+        .to_string(),
+        json!({
+            "explanation": "explanation-only change",
+            "plan": [
+                {"step": "Inspect workspace", "status": "completed"},
+                {"step": "Report results", "status": "completed"},
+            ],
+        })
+        .to_string(),
+        json!({
+            "explanation": "explanation-only change",
+            "plan": [
+                {"step": "Inspect repository", "status": "completed"},
+                {"step": "Summarize findings", "status": "completed"},
+            ],
+        })
+        .to_string(),
+        json!({
+            "explanation": "explanation-only change",
+            "plan": [
+                {"step": "Summarize findings", "status": "completed"},
+                {"step": "Inspect repository", "status": "completed"},
+            ],
+        })
+        .to_string(),
+        json!({
+            "explanation": "still complete",
+            "plan": [
+                {"step": "Summarize findings", "status": "completed"},
+                {"step": "Inspect repository", "status": "completed"},
+            ],
+        })
+        .to_string(),
+        json!({
+            "explanation": "still complete",
+            "plan": [
+                {"step": "Inspect repository", "status": "completed"},
+                {"step": "Summarize findings", "status": "completed"},
+            ],
+        })
+        .to_string(),
+    ];
+
+    let mut response_mocks = Vec::new();
+    for (index, (call_id, plan)) in call_ids.iter().zip(&plans).enumerate() {
+        let response_id = format!("resp-{}", index + 1);
+        let response = sse(vec![
+            ev_response_created(&response_id),
+            ev_function_call(call_id, "update_plan", plan),
+            ev_completed(&response_id),
+        ]);
+        response_mocks.push(responses::mount_sse_once(&server, response).await);
+    }
+
+    let session_model = session_configured.model.clone();
+
+    codex
+        .submit(Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: "please update the plan".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            cwd: cwd.path().to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            model: session_model,
+            effort: None,
+            summary: None,
+            collaboration_mode: None,
+            personality: None,
+        })
+        .await?;
+
+    let mut plan_update_events = 0usize;
+    wait_for_event(&codex, |event| match event {
+        EventMsg::PlanUpdate(_) => {
+            plan_update_events += 1;
+            false
+        }
+        EventMsg::ShutdownComplete => true,
+        _ => false,
+    })
+    .await;
+
+    assert_eq!(plan_update_events, 5);
+
+    let (baseline_output, _) = call_output(&response_mocks[1].single_request(), call_ids[0]);
+    assert_eq!(baseline_output, "Plan updated");
+
+    let guidance = "Your plan is already complete. Do not revise completed step text or explanation. If new work exists, add a step or change a step status; otherwise provide final response.";
+    for index in 1..=4 {
+        let (output, _) = call_output(&response_mocks[index + 1].single_request(), call_ids[index]);
+        assert_eq!(output, guidance);
+    }
+
+    let saw_fifth_retry_output = response_mocks
+        .iter()
+        .any(|mock| mock.function_call_output_text(call_ids[5]).is_some());
+    assert!(
+        !saw_fifth_retry_output,
+        "did not expect function_call_output for fifth retry attempt"
+    );
 
     Ok(())
 }
